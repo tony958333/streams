@@ -328,9 +328,9 @@ int main(int argc, char *argv[]) {
                 dip.s_addr=st->dip.ip32;
                 printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d",++streamNum,st->hash,inet_ntoa(sip),ntohs(st->sport));
                 printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",inet_ntoa(dip),ntohs(st->dport),st->pktNumber);
-                //for (int j=0;j<st->pktNumber;j++)
-                //    printf("%d ",st->pktInfo[j]);
-                //printf("\n");
+                for (int j=0;j<st->pktNumber;j++)
+                    printf("%d ",st->pktInfo[j]);
+                printf("\n");
                 st=st->next;
             }
         }
