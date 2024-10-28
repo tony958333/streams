@@ -1,4 +1,5 @@
 #include "main.h"
+#include "plot.h"
 
 /* 输出MAC地址 */
 static void ethdump_showMac(const int iType, const char acHWAddr[])
@@ -328,13 +329,51 @@ int main(int argc, char *argv[]) {
                 dip.s_addr=st->dip.ip32;
                 printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d",++streamNum,st->hash,inet_ntoa(sip),ntohs(st->sport));
                 printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",inet_ntoa(dip),ntohs(st->dport),st->pktNumber);
+                //
                 for (int j=0;j<st->pktNumber;j++)
                     printf("%d ",st->pktInfo[j]);
                 printf("\n");
+                //
                 st=st->next;
             }
         }
     }
+    //plotting data
+    plot_init(1024,1024);
+    //
+    Uint8 color=1;
+    for (int i=0;i<STREAM_TABLE_SIZE;i++) {
+        st=g_streamHdr+i;
+        if (st->num>0) {
+            while (st != nullptr) {
+                if (st->pktNumber<500) { st=st->next; continue; }
+                sip.s_addr=st->sip.ip32;
+                dip.s_addr=st->dip.ip32;
+                plot_color(color++%7+1);
+                //printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d",++streamNum,st->hash,inet_ntoa(sip),ntohs(st->sport));
+                //printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",inet_ntoa(dip),ntohs(st->dport),st->pktNumber);
+                int dy;
+                for (int j=0;j<st->pktNumber;j++) {
+                    dy = st->pktInfo[j]/10;
+                    if (dy>0) {
+                        //dy = 32-__builtin_clz(dy);
+                        plot_dot(j,dy);
+                    }
+                    else if (dy<0) {
+                        //dy = __builtin_clz(-dy)-32;
+                        plot_dot(j,dy);
+                    }
+                    else
+                        plot_dot(j,0);
+                }
+                st=st->next;
+            }
+        }
+    }
+    plot_show();
+    //plot_delay(30);
+    pause();
+    plot_close();
 
     /*关闭文件，清理内存 */
     fclose(fd);

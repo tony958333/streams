@@ -3,6 +3,8 @@
 #include "stdlib.h"
 #include "string.h"
 
+#include "stdbool.h"
+#include "math.h"
 #include "unistd.h"
 #include "sys/ioctl.h"
 #include "sys/types.h"
@@ -27,6 +29,8 @@
 #include "signal.h"
 #include "sys/time.h"
 
+//
+#define nullptr NULL
 /* 接收缓冲区大小 */
 #define RCV_BUF_SIZE     1514*1
 
@@ -101,6 +105,6 @@ struct streamHeader {
     struct streamHeader *next; //hash碰撞后的流表项；
     u_int32 pktInfoSize; //包长序列当前容量，初始为0
     u_int32 pktNumber;//收到的包数
-    u_int32 *pktInfo; //保存包长序列，初始大小PKTINFO_SIZE，倍增法扩容
+    int32_t *pktInfo; //保存包长序列，初始大小PKTINFO_SIZE，倍增法扩容
 };
 static struct streamHeader g_streamHdr[STREAM_TABLE_SIZE];
