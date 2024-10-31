@@ -63,9 +63,11 @@ static int ethdump_parseUdpHead(const struct udphdr *pstUdpHead)
     if (nullptr == pstUdpHead) {
         return -1;
     }
+    /*
     printf("UDP-Pkt:");
     printf("SPort=[%d] ", ntohs(pstUdpHead->uh_sport));
     printf("DPort=[%d]\n", ntohs(pstUdpHead->uh_dport));
+    */
     return 0;
 }
 
@@ -76,9 +78,9 @@ static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,const struct ip 
     if (nullptr == pstTcpHead) {
         return iRet;
     }
-    printf("TCP-Pkt:");
-    printf("SPort=[%d] ", ntohs(pstTcpHead->th_sport));
-    printf("DPort=[%d]\n", ntohs(pstTcpHead->th_dport));
+    //printf("TCP-Pkt:");
+    //printf("SPort=[%d] ", ntohs(pstTcpHead->th_sport));
+    //printf("DPort=[%d]\n", ntohs(pstTcpHead->th_dport));
     //流表处理
     struct pcap_pkthdr *hdr=(struct pcap_pkthdr *)g_pBuff;
     union ipaddr *sip=(union ipaddr *)&(pstIpHead->ip_src);
@@ -174,14 +176,19 @@ static int ethdump_parseIpHead(const struct ip *pstIpHead)
 
     /* 协议类型、源IP地址、目的IP地址 */
     pstIpProto = getprotobynumber(pstIpHead->ip_p);
+    /*
     if(nullptr != pstIpProto) {
         printf("IP-Pkt-Type:%d(%s) ", pstIpHead->ip_p, pstIpProto->p_name);
     }
     else {
         printf("IP-Pkt-Type:%d(%s) ", pstIpHead->ip_p, "None");
     }
-    printf("SAddr=[%s] ", inet_ntoa(pstIpHead->ip_src));
-    printf("DAddr=[%s]\n", inet_ntoa(pstIpHead->ip_dst));
+    char str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET,&pstIpHead->ip_src, str, sizeof(str));
+    printf("SAddr=[%s] ", str);
+    inet_ntop(AF_INET,&pstIpHead->ip_dst, str, sizeof(str));
+    printf("DAddr=[%s]\n", str);
+    */
     switch (pstIpHead->ip_p) {
         case IPPROTO_UDP:
             struct udphdr *pstUdpHdr = (struct udphdr *)(pstIpHead+1);
@@ -212,10 +219,10 @@ static int ethdump_parseEthHead(const struct ether_header *pstEthHead)
     /* 协议类型、源MAC、目的MAC */
     //
     usEthPktType = ntohs(pstEthHead->ether_type);
-    printf("Eth-Pkt-Type:0x%04x(%s) ", usEthPktType, ethdump_getProName(usEthPktType));
-    ethdump_showMac(0, pstEthHead->ether_shost);
-    ethdump_showMac(1, pstEthHead->ether_dhost);
-    printf("\n");
+    //printf("Eth-Pkt-Type:0x%04x(%s) ", usEthPktType, ethdump_getProName(usEthPktType));
+    //ethdump_showMac(0, pstEthHead->ether_shost);
+    //ethdump_showMac(1, pstEthHead->ether_dhost);
+    //printf("\n");
     //
     switch (usEthPktType) {
         case ETHERTYPE_IP:
@@ -248,14 +255,90 @@ static int ethdump_parseFrame(const char *pcFrameData)
     return iRet;
 }
 
+int readconfig() {
+    // 读取JSON文件
+    FILE *file = fopen("config.json", "r");
+    if (file == NULL) {
+        perror("config file open");
+        return -1;
+    }
+    fseek(file, 0, SEEK_END);
+    const long int n1=ftell(file);
+    rewind(file);
+    char *readBuffer = (char *)malloc(n1+16);
+    if (readBuffer == NULL) {
+        perror("buffer malloc");
+        return -1;
+    }
+    const unsigned long int n=fread(readBuffer, 1, n1, file);
+    if (n != n1) {
+        perror("config file read");
+        free(readBuffer);
+        return -1;
+    }
+    // 解析JSON文件
+    cJSON *cfg = cJSON_Parse(readBuffer);
+    if (cfg == NULL) {
+        const char *error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL) {
+            fprintf(stderr, "json error: %s\n", error_ptr);
+        }
+        fclose(file);
+        free(readBuffer);
+        return -1;
+    }
+    // 关闭文件
+    fclose(file);
+    free(readBuffer);
+    // 读取JSON数据
+    cJSON *item;
+    for (int i = 0; i < cJSON_GetArraySize(cfg); i++) {
+        item = cJSON_GetArrayItem(cfg, i);
+        // UserName
+        if (strcmp(item->child->string, "mysqlIPString") == 0) {
+            strcpy(g_cfg.mysqlIPString, item->child->valuestring);
+            inet_aton(g_cfg.mysqlIPString, &g_cfg.mysqlIP);
+        }else if (strcmp(item->child->string, "mysqlPort") == 0) {
+            g_cfg.mysqlPort=item->child->valueint;
+        }else if (strcmp(item->child->string, "mysqlUserName") == 0) {
+            strcpy(g_cfg.mysqlUserName, item->child->valuestring);
+        }else if (strcmp(item->child->string, "mysqlPassword") == 0) {
+            strcpy(g_cfg.mysqlPassword, item->child->valuestring);
+        }else if (strcmp(item->child->string, "mysqlDB") == 0) {
+            strcpy(g_cfg.mysqlDB, item->child->valuestring);
+        }
+        //printf("string:%s,valuestring:%s,valueint:%d\n", item->child->string,item->child->valuestring,item->child->valueint);
+    }
+    // clear
+    cJSON_Delete(cfg);
+    return 0;
+}
+// before exit;
+void freeBuff() {
+    for (int i=0;i<STREAM_TABLE_SIZE;i++) {
+        struct streamHeader *st = g_streamHdr + i;
+        st=st->next;
+        while (st != nullptr) {
+            struct streamHeader *last = st;
+            st=st->next;
+            free(last);
+        }
+    }
+}
+//
+int my_query(const char *query) {
+    const int res=mysql_query(g_mysql,query);
+    if (res!=0) {
+        printf("\033[1;31;40m[Mysql Error]\033[0m%s\n", mysql_error(g_mysql));
+    }
+    return res;
+}
 /* Main */
 int main(int argc, char *argv[]) {
     int iRet = -1;
     FILE *fd   = nullptr;
-    int n;
-
     //初始化流表
-    memset(g_streamHdr,0,STREAM_TABLE_SIZE);
+    memset(g_streamHdr,0,sizeof(struct streamHeader)*STREAM_TABLE_SIZE);
     //处理命令行参数
     if (argc>1) {
         strcpy(g_szDumpFileName,argv[1]); //tcpdump file name ,e.g. "dump.pcap"
@@ -263,6 +346,8 @@ int main(int argc, char *argv[]) {
         printf("\nUsage: %s [<pcap file name>]\n",argv[0]);
         printf("       <pcap file name> - default: dump.pcap\n\n");
     }
+    //read config file
+    readconfig();
     /* 打开 pcap文件 */
     fd = fopen(g_szDumpFileName,"rb");
     if(!fd) {
@@ -270,7 +355,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
     //处理pcap文件头
-    n=fread(&g_pcapFileHeader,sizeof(g_pcapFileHeader),1,fd);
+    unsigned long int n = fread(&g_pcapFileHeader, sizeof(g_pcapFileHeader), 1, fd);
     if (n>0) {
         printf("magic: %x\n",g_pcapFileHeader.magic);
         printf("major: %x\n",g_pcapFileHeader.version_major);
@@ -313,7 +398,7 @@ int main(int argc, char *argv[]) {
             break;
         }
         pktNo++;
-        printf("\033[1;31;40m>>> Packet %lld: len=%d bytes, cap=%d bytes.\033[0m\n",pktNo,hdr->len,hdr->caplen);
+        //printf("\033[1;31;40m>>> Packet %lld: len=%d bytes, cap=%d bytes.\033[0m\n",pktNo,hdr->len,hdr->caplen);
         /* 解析数据帧*/
         ethdump_parseFrame(buff);
     }
@@ -327,18 +412,23 @@ int main(int argc, char *argv[]) {
             while (st != nullptr) {
                 sip.s_addr=st->sip.ip32;
                 dip.s_addr=st->dip.ip32;
-                printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d",++streamNum,st->hash,inet_ntoa(sip),ntohs(st->sport));
-                printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",inet_ntoa(dip),ntohs(st->dport),st->pktNumber);
-                //
+                /*
+                char str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET,&sip, str, sizeof(str));
+                printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d",++streamNum,st->hash,str,ntohs(st->sport));
+                inet_ntop(AF_INET,&dip, str, sizeof(str));
+                printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",str,ntohs(st->dport),st->pktNumber);
+                */
+                /*
                 for (int j=0;j<st->pktNumber;j++)
                     printf("%d ",st->pktInfo[j]);
                 printf("\n");
-                //
+                */
                 st=st->next;
             }
         }
     }
-    //plotting data
+    /*/plotting data
     plot_init(1024,1024);
     //
     Uint8 color=1;
@@ -350,8 +440,12 @@ int main(int argc, char *argv[]) {
                 sip.s_addr=st->sip.ip32;
                 dip.s_addr=st->dip.ip32;
                 plot_color(color++%7+1);
-                //printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d",++streamNum,st->hash,inet_ntoa(sip),ntohs(st->sport));
-                //printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",inet_ntoa(dip),ntohs(st->dport),st->pktNumber);
+                //char str[INET_ADDRSTRLEN];
+                //inet_ntop(AF_INET,&sip, str, sizeof(str));
+                //printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d",++streamNum,st->hash,str,ntohs(st->sport));
+                //char str[INET_ADDRSTRLEN];
+                //inet_ntop(AF_INET,&dip, str, sizeof(str));
+                //printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",str,ntohs(st->dport),st->pktNumber);
                 int dy;
                 for (int j=0;j<st->pktNumber;j++) {
                     dy = st->pktInfo[j]/10;
@@ -371,25 +465,68 @@ int main(int argc, char *argv[]) {
         }
     }
     plot_show();
-    //plot_delay(30);
-    pause();
+    plot_delay(1);
+    //pause();
     plot_close();
-
-    /*关闭文件，清理内存 */
+    */
+    /*关闭文件，清理文件处理缓冲区内存 */
     fclose(fd);
     free(g_pBuff);
-    //
-    struct streamHeader *last;
+
+    // write to mysql
+    // connect mysql
+    g_mysql=mysql_init(NULL);
+    if (g_mysql == NULL) {
+        perror("[Error]Cannot init mysql");
+        freeBuff();
+        return 0;
+    }
+    if( mysql_real_connect(g_mysql,g_cfg.mysqlIPString,g_cfg.mysqlUserName,g_cfg.mysqlPassword,NULL,g_cfg.mysqlPort,NULL,0)==NULL){
+        perror("[Error]Cannot connect to mysql");
+        freeBuff();
+        mysql_close(g_mysql);
+        return 0;
+    }
+    mysql_set_character_set(g_mysql, "utf8");
+    sprintf(g_sql,"create database if not exists %s;",g_cfg.mysqlDB);
+    my_query(g_sql);
+    mysql_select_db(g_mysql,g_cfg.mysqlDB);
+    my_query("create table if not exists streams(sid int unique key auto_increment,sip varchar(16), sport int, dip varchar(16), dport int, protocol int, pknumber int,PRIMARY KEY (sip,sport,dip,dport,protocol));");
+    my_query("create table if not exists pktinfo(sid int ,pid int, pktlen int, PRIMARY KEY(sid,pid));");
+    MYSQL_RES *res;
     for (int i=0;i<STREAM_TABLE_SIZE;i++) {
         st=g_streamHdr+i;
-        st=st->next;
-        while (st != nullptr) {
-            last=st;
-            st=st->next;
-            free(last);
+        if (st->num>0) {
+            while (st != nullptr) {
+                sip.s_addr=st->sip.ip32;
+                dip.s_addr=st->dip.ip32;
+                char strSip[INET_ADDRSTRLEN];
+                char strDip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET,&sip, strSip, sizeof(strSip));
+                inet_ntop(AF_INET,&dip, strDip, sizeof(strDip));
+                printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",++streamNum,st->hash,strSip,ntohs(st->sport),strDip,ntohs(st->dport),st->pktNumber);
+                //
+                sprintf(g_sql,"insert into streams(sip,sport,dip,dport,pknumber,protocol) values('%s',%d,'%s',%d,%d,%d);",strSip,ntohs(st->sport),strDip,ntohs(st->dport),st->pktNumber,IPPROTO_TCP);
+                my_query(g_sql);
+                sprintf(g_sql,"select sid from streams where sip='%s' and sport=%d and dip='%s' and dport=%d and protocol=%d;",strSip,ntohs(st->sport),strDip,ntohs(st->dport),IPPROTO_TCP);
+                my_query(g_sql);
+                res = mysql_store_result(g_mysql);
+                MYSQL_ROW row_data = mysql_fetch_row(res);
+                printf("%s\n",row_data[0]);
+                for (int j=0;j<st->pktNumber;j++){
+                    sprintf(g_sql,"insert into pktinfo(sid,pid,pktlen) values(%s,%d,%d); ",row_data[0],j+1,st->pktInfo[j]);
+                    my_query(g_sql);
+                }
+                printf("\n");
+                //
+                st=st->next;
+            }
         }
     }
+    mysql_free_result(res);
+    mysql_close(g_mysql);
     //
+    freeBuff();
     return 0;
 }
 

@@ -28,25 +28,21 @@
 #include "arpa/inet.h"
 #include "signal.h"
 #include "sys/time.h"
-
+#include "cjson/cJSON.h" //sudo apt install libcjson-dev
+#include "mysql/mysql.h"
 //
 #define nullptr NULL
 /* 接收缓冲区大小 */
 #define RCV_BUF_SIZE     1514*1
 
 //待处理的tcpdump文件名
-static  char g_szDumpFileName[1024]="dump.pcap";
+char g_szDumpFileName[1024]="dump.pcap";
 
 /* 接收缓冲区 */
-static int g_iRecvBufSize = RCV_BUF_SIZE;
-static char g_acRecvBuf[RCV_BUF_SIZE] = {0};
-static char *g_pBuff;
-
-/* 物理网卡接口,需要根据具体情况修改 */
-static char g_szIfName[128] = "eno1";
+char *g_pBuff;
 
 /*以太网帧封装的协议类型 */
-static const int g_iEthProId[] = {
+const int g_iEthProId[] = {
     ETHERTYPE_PUP,
     ETHERTYPE_SPRITE,
     ETHERTYPE_IP,
@@ -60,7 +56,7 @@ static const int g_iEthProId[] = {
     ETHERTYPE_LOOPBACK
 };
 //协议类型名字
-static const char g_szProName[][24] = { "none", "xerox pup", "sprite", "ip","arp","rarp", "apple-protocol","apple-arp","802.1q", "ipx","ipv6", "loopback"};
+const char g_szProName[][24] = { "none", "xerox pup", "sprite", "ip","arp","rarp", "apple-protocol","apple-arp","802.1q", "ipx","ipv6", "loopback"};
 
 //类型定义
 typedef unsigned char u_int8;
@@ -83,7 +79,7 @@ struct time_val {
     u_int32 tv_usec;				//时间戳地位，精确到microseconds
 };
 //pcap file global header
-static struct pcap_file_header g_pcapFileHeader;
+struct pcap_file_header g_pcapFileHeader;
 //pcap数据包头结构体
 struct pcap_pkthdr {
     struct time_val ts;			//捕获时间
@@ -107,4 +103,45 @@ struct streamHeader {
     u_int32 pktNumber;//收到的包数
     int32_t *pktInfo; //保存包长序列，初始大小PKTINFO_SIZE，倍增法扩容
 };
-static struct streamHeader g_streamHdr[STREAM_TABLE_SIZE];
+struct streamHeader g_streamHdr[STREAM_TABLE_SIZE];
+/*---- mysql config ----*/
+struct config {
+    struct in_addr mysqlIP;
+    u_int16 mysqlPort;
+    char mysqlIPString[64];
+    char mysqlUserName[128];
+    char mysqlPassword[128];
+    char mysqlDB[128];
+} g_cfg;
+MYSQL *g_mysql;
+char g_sql[2048];
+char* itoa(int num,char* str,int radix)
+{/*索引表*/
+    char index[]="0123456789ABCDEF";
+    unsigned int unum;/*中间变量*/
+    int i=0,j,k;
+    /*确定unum的值*/
+    if(radix==10 && num<0){/*十进制负数*/
+        unum=(unsigned int)-num;
+        str[i++]='-';
+    }
+    else unum=(unsigned int)num;/*其他情况*/
+    /*转换*/
+    do{
+        str[i++]=index[unum%(unsigned int)radix];
+        unum/=radix;
+    }while(unum);
+    str[i]='\0';
+    /*逆序*/
+    if(str[0]=='-')
+        k=1;/*十进制负数*/
+    else
+        k=0;
+
+    for(j=k;j<=(i-1)/2;j++){
+        char temp = str[j];
+        str[j]=str[i-1+k-j];
+        str[i-1+k-j]=temp;
+    }
+    return str;
+}
