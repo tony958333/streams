@@ -28,15 +28,22 @@
 #include "arpa/inet.h"
 #include "signal.h"
 #include "sys/time.h"
-#include "cjson/cJSON.h" //sudo apt install libcjson-dev
+#include "cjson/cJSON.h"
+//sudo apt install libcjson-dev
 #include "mysql/mysql.h"
-//
+//sudo apt install mysql-server
+//sudo apt install libmysqlclient-dev
+//sudo mysql
+//ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'Cxx12345';
+//FLUSH PRIVILEGES;
+
 #define nullptr NULL
 /* 接收缓冲区大小 */
 #define RCV_BUF_SIZE     1514*1
 
 //待处理的tcpdump文件名
 char g_szDumpFileName[1024]="dump.pcap";
+long long g_pktno; //paket no in pcap file
 
 /* 接收缓冲区 */
 char *g_pBuff;
@@ -93,6 +100,10 @@ union ipaddr {
     u_int32 ip32;
     u_int16 ip16[2];
 };
+struct pktinfo_t {
+    int32_t pktlen;
+    int32_t pcappktno; // packet number in pcap file
+};
 struct streamHeader {
     u_int16 hash; //sip(H)^sip(L)^dip(H)^dip(L)^sport^dport
     union ipaddr sip,dip;
@@ -101,7 +112,7 @@ struct streamHeader {
     struct streamHeader *next; //hash碰撞后的流表项；
     u_int32 pktInfoSize; //包长序列当前容量，初始为0
     u_int32 pktNumber;//收到的包数
-    int32_t *pktInfo; //保存包长序列，初始大小PKTINFO_SIZE，倍增法扩容
+    struct pktinfo_t *pktInfo; //保存包特征序列，初始大小PKTINFO_SIZE，可以倍增法扩容
 };
 struct streamHeader g_streamHdr[STREAM_TABLE_SIZE];
 /*---- mysql config ----*/
@@ -112,36 +123,9 @@ struct config {
     char mysqlUserName[128];
     char mysqlPassword[128];
     char mysqlDB[128];
+    char mysqlStreamsTbl[128];
+    char mysqlPktInfoTbl[128];
 } g_cfg;
 MYSQL *g_mysql;
 char g_sql[2048];
-char* itoa(int num,char* str,int radix)
-{/*索引表*/
-    char index[]="0123456789ABCDEF";
-    unsigned int unum;/*中间变量*/
-    int i=0,j,k;
-    /*确定unum的值*/
-    if(radix==10 && num<0){/*十进制负数*/
-        unum=(unsigned int)-num;
-        str[i++]='-';
-    }
-    else unum=(unsigned int)num;/*其他情况*/
-    /*转换*/
-    do{
-        str[i++]=index[unum%(unsigned int)radix];
-        unum/=radix;
-    }while(unum);
-    str[i]='\0';
-    /*逆序*/
-    if(str[0]=='-')
-        k=1;/*十进制负数*/
-    else
-        k=0;
-
-    for(j=k;j<=(i-1)/2;j++){
-        char temp = str[j];
-        str[j]=str[i-1+k-j];
-        str[i-1+k-j]=temp;
-    }
-    return str;
-}
+#define error1(title,s1) printf("\033[1;31;40m[%s Error]\033[0m%s\n",title,s1)

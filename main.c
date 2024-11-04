@@ -141,26 +141,27 @@ static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,const struct ip 
     //处理包长序列，当前st指向待处理的流表项
     if (st->pktNumber==0) {
         //新流初始化包长序列
-        st->pktInfo=malloc(sizeof(u_int32)*PKTINFO_SIZE);
+        st->pktInfo=malloc(sizeof(struct pktinfo_t)*PKTINFO_SIZE);
         if (st->pktInfo==nullptr) {
             perror("malloc new pktInfo");
             return iRet;
         }
-        memset(st->pktInfo,0,sizeof(u_int32)*PKTINFO_SIZE);
+        memset(st->pktInfo,0,sizeof(struct pktinfo_t)*PKTINFO_SIZE);
         st->pktInfoSize=PKTINFO_SIZE;
     }else if (st->pktNumber==st->pktInfoSize) {
         //包长序列容量已满，扩增容量
-        st->pktInfo=realloc(st->pktInfo,sizeof(u_int32)*(st->pktInfoSize+PKTINFO_SIZE));
+        st->pktInfo=realloc(st->pktInfo,sizeof(struct pktinfo_t)*(st->pktInfoSize+PKTINFO_SIZE));
         if (st->pktInfo==nullptr) {
             perror("realloc pktInfo");
             return iRet;
         }
         st->pktInfoSize+=PKTINFO_SIZE;
     }
+    st->pktInfo[st->pktNumber++].pcappktno=g_pktno;
     if (bDownStream)
-        st->pktInfo[st->pktNumber++]=-hdr->len;
+        st->pktInfo[st->pktNumber++].pktlen=-hdr->len;
     else
-        st->pktInfo[st->pktNumber++]=hdr->len;
+        st->pktInfo[st->pktNumber++].pktlen=hdr->len;
     iRet=0;
     return iRet;
 }
@@ -291,13 +292,22 @@ int readconfig() {
     fclose(file);
     free(readBuffer);
     // 读取JSON数据
+    /*
+     [
+        {"mysqlIPString:"127.0.0.1"},
+        {"mysqlPort:3306},
+        {"mysqlUserName:"root"},
+        {"mysqlPassword:"Cxx12345_"},
+        {"mysqlDB:"streams"}
+     ]
+     */
     cJSON *item;
     for (int i = 0; i < cJSON_GetArraySize(cfg); i++) {
         item = cJSON_GetArrayItem(cfg, i);
         // UserName
         if (strcmp(item->child->string, "mysqlIPString") == 0) {
             strcpy(g_cfg.mysqlIPString, item->child->valuestring);
-            inet_aton(g_cfg.mysqlIPString, &g_cfg.mysqlIP);
+            inet_pton(AF_INET,g_cfg.mysqlIPString,&g_cfg.mysqlIP);
         }else if (strcmp(item->child->string, "mysqlPort") == 0) {
             g_cfg.mysqlPort=item->child->valueint;
         }else if (strcmp(item->child->string, "mysqlUserName") == 0) {
@@ -306,6 +316,10 @@ int readconfig() {
             strcpy(g_cfg.mysqlPassword, item->child->valuestring);
         }else if (strcmp(item->child->string, "mysqlDB") == 0) {
             strcpy(g_cfg.mysqlDB, item->child->valuestring);
+        }else if (strcmp(item->child->string,"mysqlStreamsTbl") == 0) {
+            strcpy(g_cfg.mysqlStreamsTbl, item->child->valuestring);
+        }else if (strcmp(item->child->string,"mysqlPktInfoTbl") == 0) {
+            strcpy(g_cfg.mysqlPktInfoTbl, item->child->valuestring);
         }
         //printf("string:%s,valuestring:%s,valueint:%d\n", item->child->string,item->child->valuestring,item->child->valueint);
     }
@@ -329,7 +343,7 @@ void freeBuff() {
 int my_query(const char *query) {
     const int res=mysql_query(g_mysql,query);
     if (res!=0) {
-        printf("\033[1;31;40m[Mysql Error]\033[0m%s\n", mysql_error(g_mysql));
+        error1("Mysql",mysql_error(g_mysql));
     }
     return res;
 }
@@ -337,17 +351,31 @@ int my_query(const char *query) {
 int main(int argc, char *argv[]) {
     int iRet = -1;
     FILE *fd   = nullptr;
+    //read config file
+    g_cfg.mysqlPort=3306;
+    strcpy(g_cfg.mysqlIPString,"127.0.0.1");
+    inet_pton(AF_INET,g_cfg.mysqlIPString,&g_cfg.mysqlIP);
+    strcpy(g_cfg.mysqlUserName,"root");
+    strcpy(g_cfg.mysqlPassword,"Cxx12345_");
+    strcpy(g_cfg.mysqlDB,"streams");
+    strcpy(g_cfg.mysqlStreamsTbl,"streams");
+    strcpy(g_cfg.mysqlPktInfoTbl,"pktinfo");
+    readconfig();
     //初始化流表
     memset(g_streamHdr,0,sizeof(struct streamHeader)*STREAM_TABLE_SIZE);
     //处理命令行参数
     if (argc>1) {
         strcpy(g_szDumpFileName,argv[1]); //tcpdump file name ,e.g. "dump.pcap"
-    } else {
-        printf("\nUsage: %s [<pcap file name>]\n",argv[0]);
-        printf("       <pcap file name> - default: dump.pcap\n\n");
     }
-    //read config file
-    readconfig();
+    if (argc>2) {
+        sprintf(g_cfg.mysqlStreamsTbl,"%s_streams",argv[2]);
+        sprintf(g_cfg.mysqlPktInfoTbl,"%s_pktinfo",argv[2]);
+    }
+    if (argc==1) {
+        printf("\nUsage: %s [<pcap file name> [<mysql table name prefix>]]\n",argv[0]);
+        printf("       <pcap file name> - default: dump.pcap\n");
+        printf("       <mysql table name prefix> - default: ''\n\n");
+    }
     /* 打开 pcap文件 */
     fd = fopen(g_szDumpFileName,"rb");
     if(!fd) {
@@ -370,7 +398,7 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     /* 处理数据包 */
-    long long pktNo=0;
+    g_pktno=0;
     g_pBuff = (char *)malloc(g_pcapFileHeader.snaplen+sizeof(struct pcap_pkthdr));
     if (g_pBuff == nullptr) {
         perror("[Error]Cannot malloc pcap packet buffer");
@@ -383,7 +411,7 @@ int main(int argc, char *argv[]) {
         buff=g_pBuff;
         n=fread(buff,sizeof(struct pcap_pkthdr),1,fd);
         if (n==0) {
-            printf("%lld packets processed.\n",pktNo);
+            printf("%lld packets processed.\n",g_pktno);
             break;
         }else if (n<0){
             perror("[Error]Cannot read pcap packet header");
@@ -397,7 +425,7 @@ int main(int argc, char *argv[]) {
             perror("[Error]Cannot read pcap packet");
             break;
         }
-        pktNo++;
+        g_pktno++;
         //printf("\033[1;31;40m>>> Packet %lld: len=%d bytes, cap=%d bytes.\033[0m\n",pktNo,hdr->len,hdr->caplen);
         /* 解析数据帧*/
         ethdump_parseFrame(buff);
@@ -429,7 +457,7 @@ int main(int argc, char *argv[]) {
         }
     }
     /*/plotting data
-    plot_init(1024,1024);
+    plot_init(1024,1024,1,1);
     //
     Uint8 color=1;
     for (int i=0;i<STREAM_TABLE_SIZE;i++) {
@@ -448,14 +476,14 @@ int main(int argc, char *argv[]) {
                 //printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",str,ntohs(st->dport),st->pktNumber);
                 int dy;
                 for (int j=0;j<st->pktNumber;j++) {
-                    dy = st->pktInfo[j]/10;
+                    dy = st->pktInfo[j];
                     if (dy>0) {
                         //dy = 32-__builtin_clz(dy);
-                        plot_dot(j,dy);
+                        plot_line(j,dy,j,0);
                     }
                     else if (dy<0) {
                         //dy = __builtin_clz(-dy)-32;
-                        plot_dot(j,dy);
+                        plot_line(j,dy,j,0);
                     }
                     else
                         plot_dot(j,0);
@@ -468,7 +496,7 @@ int main(int argc, char *argv[]) {
     plot_delay(1);
     //pause();
     plot_close();
-    */
+    /*/
     /*关闭文件，清理文件处理缓冲区内存 */
     fclose(fd);
     free(g_pBuff);
@@ -491,8 +519,10 @@ int main(int argc, char *argv[]) {
     sprintf(g_sql,"create database if not exists %s;",g_cfg.mysqlDB);
     my_query(g_sql);
     mysql_select_db(g_mysql,g_cfg.mysqlDB);
-    my_query("create table if not exists streams(sid int unique key auto_increment,sip varchar(16), sport int, dip varchar(16), dport int, protocol int, pknumber int,PRIMARY KEY (sip,sport,dip,dport,protocol));");
-    my_query("create table if not exists pktinfo(sid int ,pid int, pktlen int, PRIMARY KEY(sid,pid));");
+    sprintf(g_sql,"create table if not exists %s(pcapname varchar(256),sid int unique key auto_increment,sip varchar(16), sport int, dip varchar(16), dport int, protocol int, pknumber int,PRIMARY KEY (sip,sport,dip,dport,protocol));",g_cfg.mysqlStreamsTbl);
+    my_query(g_sql);
+    sprintf(g_sql,"create table if not exists %s(sid int ,pid int, pktlen int, pcappktno int, PRIMARY KEY(sid,pid));",g_cfg.mysqlPktInfoTbl);
+    my_query(g_sql);
     MYSQL_RES *res;
     for (int i=0;i<STREAM_TABLE_SIZE;i++) {
         st=g_streamHdr+i;
@@ -506,18 +536,22 @@ int main(int argc, char *argv[]) {
                 inet_ntop(AF_INET,&dip, strDip, sizeof(strDip));
                 printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",++streamNum,st->hash,strSip,ntohs(st->sport),strDip,ntohs(st->dport),st->pktNumber);
                 //
-                sprintf(g_sql,"insert into streams(sip,sport,dip,dport,pknumber,protocol) values('%s',%d,'%s',%d,%d,%d);",strSip,ntohs(st->sport),strDip,ntohs(st->dport),st->pktNumber,IPPROTO_TCP);
+                sprintf(g_sql,"insert into %s(pcapname,sip,sport,dip,dport,pknumber,protocol) values('%s','%s',%d,'%s',%d,%d,%d);",g_cfg.mysqlStreamsTbl,g_szDumpFileName,strSip,ntohs(st->sport),strDip,ntohs(st->dport),st->pktNumber,IPPROTO_TCP);
                 my_query(g_sql);
-                sprintf(g_sql,"select sid from streams where sip='%s' and sport=%d and dip='%s' and dport=%d and protocol=%d;",strSip,ntohs(st->sport),strDip,ntohs(st->dport),IPPROTO_TCP);
+                sprintf(g_sql,"select sid from %s where sip='%s' and sport=%d and dip='%s' and dport=%d and protocol=%d;",g_cfg.mysqlStreamsTbl,strSip,ntohs(st->sport),strDip,ntohs(st->dport),IPPROTO_TCP);
                 my_query(g_sql);
                 res = mysql_store_result(g_mysql);
                 MYSQL_ROW row_data = mysql_fetch_row(res);
-                printf("%s\n",row_data[0]);
-                for (int j=0;j<st->pktNumber;j++){
-                    sprintf(g_sql,"insert into pktinfo(sid,pid,pktlen) values(%s,%d,%d); ",row_data[0],j+1,st->pktInfo[j]);
-                    my_query(g_sql);
+                if (row_data!=nullptr) {
+                    printf("%s\n",row_data[0]);
+                    for (int j=0;j<st->pktNumber;j++){
+                        sprintf(g_sql,"insert into %s(sid,pid,pktlen,pcappktno) values(%s,%d,%d,%d); ",g_cfg.mysqlPktInfoTbl,row_data[0],j+1,st->pktInfo[j].pktlen,st->pktInfo[j].pcappktno);
+                        my_query(g_sql);
+                    }
+                    printf("\n");
+                }else {
+                    error1("SQL",g_sql);
                 }
-                printf("\n");
                 //
                 st=st->next;
             }

@@ -51,9 +51,11 @@ void plot_dots(int startx,int *ys, int cnt) {
 void plot_line(int x1, int y1, int x2, int y2) {
     SDL_RenderDrawLine(renderer, Ox+x1*UnitX, Oy-y1*UnitY, Ox+x2*UnitX, Oy-y2*UnitY);
 }
-int plot_init(int width, int height) {
+int plot_init(int width, int height, int Ux, int Uy) {
     screen_width = width;
     screen_height = height;
+    UnitX=Ux;
+    UnitY=Uy;
     Ox=50;
     Oy=screen_height/2;
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
