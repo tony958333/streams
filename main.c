@@ -33,20 +33,26 @@ static char *ethdump_getProName(const int iProNum)
 /* 解析IPv6数据包头 */
 static int ethdump_parseIpv6Head(const struct ipv6hdr *pstIpv6Head)
 {
-    int iRet=-1;
     if (nullptr == pstIpv6Head) {
         return -1;
     }
+    char strSip[INET6_ADDRSTRLEN];
+    char strDip[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6,&pstIpv6Head->saddr, strSip, sizeof(strSip));
+    inet_ntop(AF_INET6,&pstIpv6Head->daddr, strDip, sizeof(strDip));
     printf("IPv6-Pkt:");
+    /*
     uint16_t *sa=(uint16_t *)&(pstIpv6Head->saddr.__in6_u.__u6_addr16);
     uint16_t *da=(uint16_t *)&(pstIpv6Head->daddr.__in6_u.__u6_addr16);
     printf("SAddr=[%x:%x:%x:%x:%x:%x:%x:%x] ", ntohs(sa[0]), ntohs(sa[1]), ntohs(sa[2]),ntohs(sa[3]), ntohs(sa[4]), ntohs(sa[5]), ntohs(sa[6]), ntohs(sa[7]));
     printf("DAddr=[%x:%x:%x:%x:%x:%x:%x:%x]\n",ntohs(da[0]), ntohs(da[1]), ntohs(da[2]),ntohs(da[3]), ntohs(da[4]), ntohs(da[5]), ntohs(da[6]), ntohs(da[7]));
-    return iRet;
+    */
+    printf("(%d)%s:%d -> %s:%d\n",pstIpv6Head->nexthdr,strSip,*pstIpv6Head->flow_lbl,strDip,*pstIpv6Head->flow_lbl);
+    return 0;
 }
 
 /* 解析ICMP数据包头 */
-static int ethdump_parseIcmpHead(const struct icmphdr *pstIcmpHead)
+static int ethdump_parseIcmpHead(const struct icmphdr *pstIcmpHead,const struct ip *pstIpHead)
 {
     if (nullptr == pstIcmpHead) {
         return -1;
@@ -58,7 +64,7 @@ static int ethdump_parseIcmpHead(const struct icmphdr *pstIcmpHead)
 }
 
 /* 解析UDP数据包头 */
-static int ethdump_parseUdpHead(const struct udphdr *pstUdpHead)
+static int ethdump_parseUdpHead(const struct udphdr *pstUdpHead,const struct ip *pstIpHead)
 {
     if (nullptr == pstUdpHead) {
         return -1;
@@ -68,47 +74,52 @@ static int ethdump_parseUdpHead(const struct udphdr *pstUdpHead)
     printf("SPort=[%d] ", ntohs(pstUdpHead->uh_sport));
     printf("DPort=[%d]\n", ntohs(pstUdpHead->uh_dport));
     */
-    return 0;
-}
-
-/* 解析TCP数据包头 */
-static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,const struct ip *pstIpHead)
-{
-    int iRet=-1;
-    if (nullptr == pstTcpHead) {
-        return iRet;
-    }
-    //printf("TCP-Pkt:");
-    //printf("SPort=[%d] ", ntohs(pstTcpHead->th_sport));
-    //printf("DPort=[%d]\n", ntohs(pstTcpHead->th_dport));
     //流表处理
     struct pcap_pkthdr *hdr=(struct pcap_pkthdr *)g_pBuff;
     union ipaddr *sip=(union ipaddr *)&(pstIpHead->ip_src);
     union ipaddr *dip=(union ipaddr *)&(pstIpHead->ip_dst);
     bool bDownStream=false; //上行流还是下行流
     //计算hash，即流表索引
-    u_int16 hash=sip->ip16[0]^sip->ip16[1]^dip->ip16[0]^dip->ip16[1]^pstTcpHead->th_sport^pstTcpHead->th_dport;
+    u_int16 hash=sip->ip16[0]^sip->ip16[1]^dip->ip16[0]^dip->ip16[1]^pstUdpHead->uh_sport^pstUdpHead->uh_dport;
     struct streamHeader *st=g_streamHdr+hash;
     if (st->num==0) {
         //新hash值，直接建新流
+        memset(st,0,sizeof(struct streamHeader));
         st->num=1; //该表项包含多少个流
         st->hash=hash; //sip(H)^sip(L)^dip(H)^dip(L)^sport^dport
-        st->sip=*sip;
-        st->dip=*dip;
-        st->sport=pstTcpHead->th_sport;
-        st->dport=pstTcpHead->th_dport;
+        if (ntohs(pstUdpHead->uh_dport)<1024 && ntohs(pstUdpHead->uh_sport)>=1024)
+            bDownStream=false;
+        else if (ntohs(pstUdpHead->uh_sport)<1024 && ntohs(pstUdpHead->uh_dport)>=1024)
+            bDownStream=true;
+        else if (ntohs(pstUdpHead->uh_dport)<10000 && ntohs(pstUdpHead->uh_sport)>=10000)
+            bDownStream=false;
+        else if (ntohs(pstUdpHead->uh_sport)<10000 && ntohs(pstUdpHead->uh_dport)>=10000)
+            bDownStream=true;
+        if (bDownStream) {
+            st->sip=*dip;
+            st->dip=*sip;
+            st->sport=pstUdpHead->uh_dport;
+            st->dport=pstUdpHead->uh_sport;
+        }else {
+            st->sip=*sip;
+            st->dip=*dip;
+            st->sport=pstUdpHead->uh_sport;
+            st->dport=pstUdpHead->uh_dport;
+        }
+        st->protocol=IPPROTO_UDP;
         st->next=nullptr; //hash碰撞后的流表项；
         st->pktNumber=0;//收到的包数
         st->pktInfoSize=0;//包长序列当前容量，初始为0
         st->pktInfo=nullptr; //保存包长序列，初始大小PKTINFO_SIZE，倍增法扩容
     }else {
         //hash已存在，查找是否已存在旧流
+        int num=st->num;
         while (st!=nullptr) {
-            if (st->sip.ip32==sip->ip32 && st->dip.ip32==dip->ip32 && st->sport==pstTcpHead->th_sport && st->dport==pstTcpHead->th_dport) {
+            if (st->sip.ip32==sip->ip32 && st->dip.ip32==dip->ip32 && st->sport==pstUdpHead->uh_sport && st->dport==pstUdpHead->uh_dport && st->protocol==IPPROTO_UDP) {
                 bDownStream=false;
                 break;
             }
-            if (st->sip.ip32==dip->ip32 && st->dip.ip32==sip->ip32 && st->sport==pstTcpHead->th_dport && st->dport==pstTcpHead->th_sport) {
+            if (st->sip.ip32==dip->ip32 && st->dip.ip32==sip->ip32 && st->sport==pstUdpHead->uh_dport && st->dport==pstUdpHead->uh_sport && st->protocol==IPPROTO_UDP) {
                 bDownStream=true;
                 break;
             }
@@ -119,17 +130,33 @@ static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,const struct ip 
             st=malloc(sizeof(struct streamHeader));
             if (st==nullptr) {
                 perror("malloc new streamHeader");
-                return iRet;
+                return -1;
             }
             memset(st,0,sizeof(struct streamHeader));
             st->next=(g_streamHdr+hash)->next;
             (g_streamHdr+hash)->next=st;
-            st->num=1; //该表项包含多少个流
+            st->num=num+1; //该表项包含多少个流
             st->hash=hash; //sip(H)^sip(L)^dip(H)^dip(L)^sport^dport
-            st->sip=*sip;
-            st->dip=*dip;
-            st->sport=pstTcpHead->th_sport;
-            st->dport=pstTcpHead->th_dport;
+            if (ntohs(pstUdpHead->uh_dport)<1024 && ntohs(pstUdpHead->uh_sport)>=1024)
+                bDownStream=false;
+            else if (ntohs(pstUdpHead->uh_sport)<1024 && ntohs(pstUdpHead->uh_dport)>=1024)
+                bDownStream=true;
+            else if (ntohs(pstUdpHead->uh_dport)<10000 && ntohs(pstUdpHead->uh_sport)>=10000)
+                bDownStream=false;
+            else if (ntohs(pstUdpHead->uh_sport)<10000 && ntohs(pstUdpHead->uh_dport)>=10000)
+                bDownStream=true;
+            if (bDownStream) {
+                st->sip=*dip;
+                st->dip=*sip;
+                st->sport=pstUdpHead->uh_dport;
+                st->dport=pstUdpHead->uh_sport;
+            }else {
+                st->sip=*sip;
+                st->dip=*dip;
+                st->sport=pstUdpHead->uh_sport;
+                st->dport=pstUdpHead->uh_dport;
+            }
+            st->protocol=IPPROTO_UDP;
             st->next=nullptr; //hash碰撞后的流表项；
             st->pktNumber=0;//收到的包数
             st->pktInfoSize=0;
@@ -144,7 +171,7 @@ static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,const struct ip 
         st->pktInfo=malloc(sizeof(struct pktinfo_t)*PKTINFO_SIZE);
         if (st->pktInfo==nullptr) {
             perror("malloc new pktInfo");
-            return iRet;
+            return -1;
         }
         memset(st->pktInfo,0,sizeof(struct pktinfo_t)*PKTINFO_SIZE);
         st->pktInfoSize=PKTINFO_SIZE;
@@ -153,17 +180,152 @@ static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,const struct ip 
         st->pktInfo=realloc(st->pktInfo,sizeof(struct pktinfo_t)*(st->pktInfoSize+PKTINFO_SIZE));
         if (st->pktInfo==nullptr) {
             perror("realloc pktInfo");
-            return iRet;
+            return -1;
         }
         st->pktInfoSize+=PKTINFO_SIZE;
     }
-    st->pktInfo[st->pktNumber++].pcappktno=g_pktno;
     if (bDownStream)
-        st->pktInfo[st->pktNumber++].pktlen=-hdr->len;
+        st->pktInfo[st->pktNumber].pktlen=-hdr->len;
     else
-        st->pktInfo[st->pktNumber++].pktlen=hdr->len;
-    iRet=0;
-    return iRet;
+        st->pktInfo[st->pktNumber].pktlen=hdr->len;
+    st->pktInfo[st->pktNumber++].pcappktno=g_pktno;
+    return 0;
+}
+
+/* 解析TCP数据包头 */
+static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,const struct ip *pstIpHead)
+{
+    if (nullptr == pstTcpHead) {
+        return -1;
+    }
+    //printf("TCP-Pkt:");
+    //printfSPort=[%d] ", ntohs(pstTcpHead->th_sport));
+    //printf("DPort=[%d]\n", ntohs(pstTcpHead->th_dport));
+    //流表处理
+    struct pcap_pkthdr *hdr=(struct pcap_pkthdr *)g_pBuff;
+    union ipaddr *sip=(union ipaddr *)&(pstIpHead->ip_src);
+    union ipaddr *dip=(union ipaddr *)&(pstIpHead->ip_dst);
+    //上行流还是下行流
+    bool bDownStream=false;
+    //计算hash，即流表索引
+    u_int16 hash=sip->ip16[0]^sip->ip16[1]^dip->ip16[0]^dip->ip16[1]^pstTcpHead->th_sport^pstTcpHead->th_dport;
+    struct streamHeader *st=g_streamHdr+hash;
+    if (st->num==0) {
+        //新hash值，直接建新流
+        memset(st,0,sizeof(struct streamHeader));
+        st->num=1; //该表项包含多少个流
+        st->hash=hash; //sip(H)^sip(L)^dip(H)^dip(L)^sport^dport
+        if (pstTcpHead->syn && pstTcpHead->ack)
+            bDownStream=true;
+        else if (pstTcpHead->syn && !pstTcpHead->ack)
+            bDownStream=false;
+        else if (ntohs(pstTcpHead->th_dport)<1024 && ntohs(pstTcpHead->th_sport)>=1024)
+            bDownStream=false;
+        else if (ntohs(pstTcpHead->th_sport)<1024 && ntohs(pstTcpHead->th_dport)>=1024)
+            bDownStream=true;
+        else if (ntohs(pstTcpHead->th_dport)<10000 && ntohs(pstTcpHead->th_sport)>=10000)
+            bDownStream=false;
+        else if (ntohs(pstTcpHead->th_sport)<10000 && ntohs(pstTcpHead->th_dport)>=10000)
+            bDownStream=true;
+        if (bDownStream) {
+            st->sip=*dip;
+            st->dip=*sip;
+            st->sport=pstTcpHead->th_dport;
+            st->dport=pstTcpHead->th_sport;
+        }else {
+            st->sip=*sip;
+            st->dip=*dip;
+            st->sport=pstTcpHead->th_sport;
+            st->dport=pstTcpHead->th_dport;
+        }
+        st->protocol=IPPROTO_TCP;
+        st->next=nullptr; //hash碰撞后的流表项；
+        st->pktNumber=0;//收到的包数
+        st->pktInfoSize=0;//包长序列当前容量，初始为0
+        st->pktInfo=nullptr; //保存包长序列，初始大小PKTINFO_SIZE，倍增法扩容
+    }else {
+        //hash已存在，查找是否已存在旧流
+        int num=st->num;
+        while (st!=nullptr) {
+            if (st->sip.ip32==sip->ip32 && st->dip.ip32==dip->ip32 && st->sport==pstTcpHead->th_sport && st->dport==pstTcpHead->th_dport && st->protocol==IPPROTO_TCP) {
+                bDownStream=false;
+                break;
+            }
+            if (st->sip.ip32==dip->ip32 && st->dip.ip32==sip->ip32 && st->sport==pstTcpHead->th_dport && st->dport==pstTcpHead->th_sport && st->protocol==IPPROTO_TCP) {
+                bDownStream=true;
+                break;
+            }
+            st=st->next;
+        }
+        if (st==nullptr) {
+            //新流,插入到最前面（假设新建的流访问频率高，老流访问频率低）
+            st=malloc(sizeof(struct streamHeader));
+            if (st==nullptr) {
+                perror("malloc new streamHeader");
+                return -1;
+            }
+            memset(st,0,sizeof(struct streamHeader));
+            st->next=(g_streamHdr+hash)->next;
+            (g_streamHdr+hash)->next=st;
+            st->num=num+1; //该表项包含多少个流
+            st->hash=hash; //sip(H)^sip(L)^dip(H)^dip(L)^sport^dport
+            if (pstTcpHead->syn && pstTcpHead->ack)
+                bDownStream=true;
+            else if (pstTcpHead->syn && !pstTcpHead->ack)
+                bDownStream=false;
+            else if (ntohs(pstTcpHead->th_dport)<1024 && ntohs(pstTcpHead->th_sport)>=1024)
+                bDownStream=false;
+            else if (ntohs(pstTcpHead->th_sport)<1024 && ntohs(pstTcpHead->th_dport)>=1024)
+                bDownStream=true;
+            else if (ntohs(pstTcpHead->th_dport)<10000 && ntohs(pstTcpHead->th_sport)>=10000)
+                bDownStream=false;
+            else if (ntohs(pstTcpHead->th_sport)<10000 && ntohs(pstTcpHead->th_dport)>=10000)
+                bDownStream=true;
+            if (bDownStream) {
+                st->sip=*dip;
+                st->dip=*sip;
+                st->sport=pstTcpHead->th_dport;
+                st->dport=pstTcpHead->th_sport;
+            }else {
+                st->sip=*sip;
+                st->dip=*dip;
+                st->sport=pstTcpHead->th_sport;
+                st->dport=pstTcpHead->th_dport;
+            }
+            st->protocol=IPPROTO_TCP;
+            st->next=nullptr; //hash碰撞后的流表项；
+            st->pktNumber=0;//收到的包数
+            st->pktInfoSize=0;
+            st->pktInfo=nullptr; //保存包长序列，初始大小PKTINFO_SIZE
+        }else {
+            //旧流，st指向流表项
+        }
+    }
+    //处理包长序列，当前st指向待处理的流表项
+    if (st->pktNumber==0) {
+        //新流初始化包长序列
+        st->pktInfo=malloc(sizeof(struct pktinfo_t)*PKTINFO_SIZE);
+        if (st->pktInfo==nullptr) {
+            perror("malloc new pktInfo");
+            return -1;
+        }
+        memset(st->pktInfo,0,sizeof(struct pktinfo_t)*PKTINFO_SIZE);
+        st->pktInfoSize=PKTINFO_SIZE;
+    }else if (st->pktNumber==st->pktInfoSize) {
+        //包长序列容量已满，扩增容量
+        st->pktInfo=realloc(st->pktInfo,sizeof(struct pktinfo_t)*(st->pktInfoSize+PKTINFO_SIZE));
+        if (st->pktInfo==nullptr) {
+            perror("realloc pktInfo");
+            return -1;
+        }
+        st->pktInfoSize+=PKTINFO_SIZE;
+    }
+    if (bDownStream)
+        st->pktInfo[st->pktNumber].pktlen=-hdr->len;
+    else
+        st->pktInfo[st->pktNumber].pktlen=hdr->len;
+    st->pktInfo[st->pktNumber++].pcappktno=g_pktno;
+    return 0;
 }
 
 /* 解析IP数据包头 */
@@ -193,7 +355,7 @@ static int ethdump_parseIpHead(const struct ip *pstIpHead)
     switch (pstIpHead->ip_p) {
         case IPPROTO_UDP:
             struct udphdr *pstUdpHdr = (struct udphdr *)(pstIpHead+1);
-            iRet = ethdump_parseUdpHead(pstUdpHdr);
+            iRet = ethdump_parseUdpHead(pstUdpHdr,pstIpHead);
             break;
         case IPPROTO_TCP:
             struct tcphdr *pstTcpHdr = (struct tcphdr *)(pstIpHead+1);
@@ -201,7 +363,7 @@ static int ethdump_parseIpHead(const struct ip *pstIpHead)
             break;
         case IPPROTO_ICMP:
             struct icmphdr *pstIcmpHdr = (struct icmphdr *)(pstIpHead+1);
-            iRet = ethdump_parseIcmpHead(pstIcmpHdr);
+            iRet = ethdump_parseIcmpHead(pstIcmpHdr,pstIpHead);
             break;
         default:
             break;
@@ -257,6 +419,14 @@ static int ethdump_parseFrame(const char *pcFrameData)
 }
 
 int readconfig() {
+    g_cfg.mysqlPort=3306;
+    strcpy(g_cfg.mysqlIPString,"127.0.0.1");
+    inet_pton(AF_INET,g_cfg.mysqlIPString,&g_cfg.mysqlIP);
+    strcpy(g_cfg.mysqlUserName,"root");
+    strcpy(g_cfg.mysqlPassword,"Cxx12345");
+    strcpy(g_cfg.mysqlDB,"streams");
+    strcpy(g_cfg.mysqlStreamsTbl,"streams");
+    strcpy(g_cfg.mysqlPktInfoTbl,"pktinfo");
     // 读取JSON文件
     FILE *file = fopen("config.json", "r");
     if (file == NULL) {
@@ -292,7 +462,7 @@ int readconfig() {
     fclose(file);
     free(readBuffer);
     // 读取JSON数据
-    /*
+    /* config.json格式：
      [
         {"mysqlIPString:"127.0.0.1"},
         {"mysqlPort:3306},
@@ -347,23 +517,8 @@ int my_query(const char *query) {
     }
     return res;
 }
-/* Main */
-int main(int argc, char *argv[]) {
-    int iRet = -1;
-    FILE *fd   = nullptr;
-    //read config file
-    g_cfg.mysqlPort=3306;
-    strcpy(g_cfg.mysqlIPString,"127.0.0.1");
-    inet_pton(AF_INET,g_cfg.mysqlIPString,&g_cfg.mysqlIP);
-    strcpy(g_cfg.mysqlUserName,"root");
-    strcpy(g_cfg.mysqlPassword,"Cxx12345_");
-    strcpy(g_cfg.mysqlDB,"streams");
-    strcpy(g_cfg.mysqlStreamsTbl,"streams");
-    strcpy(g_cfg.mysqlPktInfoTbl,"pktinfo");
-    readconfig();
-    //初始化流表
-    memset(g_streamHdr,0,sizeof(struct streamHeader)*STREAM_TABLE_SIZE);
-    //处理命令行参数
+int process_args(int argc, char *argv[]) {
+    // args parsing
     if (argc>1) {
         strcpy(g_szDumpFileName,argv[1]); //tcpdump file name ,e.g. "dump.pcap"
     }
@@ -375,6 +530,20 @@ int main(int argc, char *argv[]) {
         printf("\nUsage: %s [<pcap file name> [<mysql table name prefix>]]\n",argv[0]);
         printf("       <pcap file name> - default: dump.pcap\n");
         printf("       <mysql table name prefix> - default: ''\n\n");
+    }
+    return 0;
+}
+/* Main */
+int main(int argc, char *argv[]) {
+    int iRet = -1;
+    FILE *fd   = nullptr;
+    //read config file
+    readconfig();
+    //初始化流表
+    memset(g_streamHdr,0,sizeof(struct streamHeader)*STREAM_TABLE_SIZE);
+    //处理命令行参数
+    if (process_args(argc,argv)!=0) {
+        return -1;
     }
     /* 打开 pcap文件 */
     fd = fopen(g_szDumpFileName,"rb");
@@ -431,76 +600,12 @@ int main(int argc, char *argv[]) {
         ethdump_parseFrame(buff);
     }
     //流表统计
-    struct streamHeader *st;
-    long long streamNum=0;
-    struct in_addr sip,dip;
-    for (int i=0;i<STREAM_TABLE_SIZE;i++) {
-        st=g_streamHdr+i;
-        if (st->num>0) {
-            while (st != nullptr) {
-                sip.s_addr=st->sip.ip32;
-                dip.s_addr=st->dip.ip32;
-                /*
-                char str[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET,&sip, str, sizeof(str));
-                printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d",++streamNum,st->hash,str,ntohs(st->sport));
-                inet_ntop(AF_INET,&dip, str, sizeof(str));
-                printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",str,ntohs(st->dport),st->pktNumber);
-                */
-                /*
-                for (int j=0;j<st->pktNumber;j++)
-                    printf("%d ",st->pktInfo[j]);
-                printf("\n");
-                */
-                st=st->next;
-            }
-        }
-    }
-    /*/plotting data
-    plot_init(1024,1024,1,1);
-    //
-    Uint8 color=1;
-    for (int i=0;i<STREAM_TABLE_SIZE;i++) {
-        st=g_streamHdr+i;
-        if (st->num>0) {
-            while (st != nullptr) {
-                if (st->pktNumber<500) { st=st->next; continue; }
-                sip.s_addr=st->sip.ip32;
-                dip.s_addr=st->dip.ip32;
-                plot_color(color++%7+1);
-                //char str[INET_ADDRSTRLEN];
-                //inet_ntop(AF_INET,&sip, str, sizeof(str));
-                //printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d",++streamNum,st->hash,str,ntohs(st->sport));
-                //char str[INET_ADDRSTRLEN];
-                //inet_ntop(AF_INET,&dip, str, sizeof(str));
-                //printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",str,ntohs(st->dport),st->pktNumber);
-                int dy;
-                for (int j=0;j<st->pktNumber;j++) {
-                    dy = st->pktInfo[j];
-                    if (dy>0) {
-                        //dy = 32-__builtin_clz(dy);
-                        plot_line(j,dy,j,0);
-                    }
-                    else if (dy<0) {
-                        //dy = __builtin_clz(-dy)-32;
-                        plot_line(j,dy,j,0);
-                    }
-                    else
-                        plot_dot(j,0);
-                }
-                st=st->next;
-            }
-        }
-    }
-    plot_show();
-    plot_delay(1);
-    //pause();
-    plot_close();
-    /*/
+    //streams_stats();
+    //plotting data
+    //plot_data();
     /*关闭文件，清理文件处理缓冲区内存 */
     fclose(fd);
     free(g_pBuff);
-
     // write to mysql
     // connect mysql
     g_mysql=mysql_init(NULL);
@@ -519,11 +624,18 @@ int main(int argc, char *argv[]) {
     sprintf(g_sql,"create database if not exists %s;",g_cfg.mysqlDB);
     my_query(g_sql);
     mysql_select_db(g_mysql,g_cfg.mysqlDB);
-    sprintf(g_sql,"create table if not exists %s(pcapname varchar(256),sid int unique key auto_increment,sip varchar(16), sport int, dip varchar(16), dport int, protocol int, pknumber int,PRIMARY KEY (sip,sport,dip,dport,protocol));",g_cfg.mysqlStreamsTbl);
+    sprintf(g_sql,"drop table %s;",g_cfg.mysqlStreamsTbl);
+    my_query(g_sql);
+    sprintf(g_sql,"create table if not exists %s(pcapname varchar(256),sid int unique key auto_increment,sip varchar(16), sport int, dip varchar(16), dport int, protocol int, pktnumber int,PRIMARY KEY (sip,sport,dip,dport,protocol));",g_cfg.mysqlStreamsTbl);
+    my_query(g_sql);
+    sprintf(g_sql,"drop table %s;",g_cfg.mysqlPktInfoTbl);
     my_query(g_sql);
     sprintf(g_sql,"create table if not exists %s(sid int ,pid int, pktlen int, pcappktno int, PRIMARY KEY(sid,pid));",g_cfg.mysqlPktInfoTbl);
     my_query(g_sql);
     MYSQL_RES *res;
+    struct streamHeader *st;
+    long long streamNum=0;
+    struct in_addr sip,dip;
     for (int i=0;i<STREAM_TABLE_SIZE;i++) {
         st=g_streamHdr+i;
         if (st->num>0) {
@@ -534,16 +646,16 @@ int main(int argc, char *argv[]) {
                 char strDip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET,&sip, strSip, sizeof(strSip));
                 inet_ntop(AF_INET,&dip, strDip, sizeof(strDip));
-                printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",++streamNum,st->hash,strSip,ntohs(st->sport),strDip,ntohs(st->dport),st->pktNumber);
+                printf("%lld:hash %x,(%d) \033[1;32;40m%s\033[0m:%d -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",++streamNum,st->hash,st->protocol,strSip,ntohs(st->sport),strDip,ntohs(st->dport),st->pktNumber);
                 //
-                sprintf(g_sql,"insert into %s(pcapname,sip,sport,dip,dport,pknumber,protocol) values('%s','%s',%d,'%s',%d,%d,%d);",g_cfg.mysqlStreamsTbl,g_szDumpFileName,strSip,ntohs(st->sport),strDip,ntohs(st->dport),st->pktNumber,IPPROTO_TCP);
+                sprintf(g_sql,"insert into %s(pcapname,sip,sport,dip,dport,pktnumber,protocol) values('%s','%s',%d,'%s',%d,%d,%d);",g_cfg.mysqlStreamsTbl,g_szDumpFileName,strSip,ntohs(st->sport),strDip,ntohs(st->dport),st->pktNumber,st->protocol);
                 my_query(g_sql);
-                sprintf(g_sql,"select sid from %s where sip='%s' and sport=%d and dip='%s' and dport=%d and protocol=%d;",g_cfg.mysqlStreamsTbl,strSip,ntohs(st->sport),strDip,ntohs(st->dport),IPPROTO_TCP);
+                sprintf(g_sql,"select sid from %s where sip='%s' and sport=%d and dip='%s' and dport=%d and protocol=%d;",g_cfg.mysqlStreamsTbl,strSip,ntohs(st->sport),strDip,ntohs(st->dport),st->protocol);
                 my_query(g_sql);
                 res = mysql_store_result(g_mysql);
                 MYSQL_ROW row_data = mysql_fetch_row(res);
                 if (row_data!=nullptr) {
-                    printf("%s\n",row_data[0]);
+                    printf("sid: %s\n",row_data[0]);
                     for (int j=0;j<st->pktNumber;j++){
                         sprintf(g_sql,"insert into %s(sid,pid,pktlen,pcappktno) values(%s,%d,%d,%d); ",g_cfg.mysqlPktInfoTbl,row_data[0],j+1,st->pktInfo[j].pktlen,st->pktInfo[j].pcappktno);
                         my_query(g_sql);
@@ -552,7 +664,6 @@ int main(int argc, char *argv[]) {
                 }else {
                     error1("SQL",g_sql);
                 }
-                //
                 st=st->next;
             }
         }
@@ -563,4 +674,3 @@ int main(int argc, char *argv[]) {
     freeBuff();
     return 0;
 }
-

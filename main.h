@@ -34,12 +34,11 @@
 //sudo apt install mysql-server
 //sudo apt install libmysqlclient-dev
 //sudo mysql
+//set global validate_password.policy='LOW';
 //ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'Cxx12345';
 //FLUSH PRIVILEGES;
 
 #define nullptr NULL
-/* 接收缓冲区大小 */
-#define RCV_BUF_SIZE     1514*1
 
 //待处理的tcpdump文件名
 char g_szDumpFileName[1024]="dump.pcap";
@@ -106,15 +105,21 @@ struct pktinfo_t {
 };
 struct streamHeader {
     u_int16 hash; //sip(H)^sip(L)^dip(H)^dip(L)^sport^dport
-    union ipaddr sip,dip;
-    u_int16 sport,dport;
     u_int16 num;  //该表项包含多少个流
     struct streamHeader *next; //hash碰撞后的流表项；
+    //
+    union ipaddr sip,dip; //table streams field 3,5
+    u_int16 sport,dport;  //table streams field 4,6
+    u_int8 protocol;      //table streams field 7
+    struct time_val ts;			//首包捕获时间
+    u_int64 upstreamlen;  //上行数据包总长度
+    u_int64 downstreamlen;  //下行数据包总长度
     u_int32 pktInfoSize; //包长序列当前容量，初始为0
-    u_int32 pktNumber;//收到的包数
+    u_int32 pktNumber;   //收到的包数 table streams field 8
     struct pktinfo_t *pktInfo; //保存包特征序列，初始大小PKTINFO_SIZE，可以倍增法扩容
 };
 struct streamHeader g_streamHdr[STREAM_TABLE_SIZE];
+
 /*---- mysql config ----*/
 struct config {
     struct in_addr mysqlIP;
@@ -129,3 +134,32 @@ struct config {
 MYSQL *g_mysql;
 char g_sql[2048];
 #define error1(title,s1) printf("\033[1;31;40m[%s Error]\033[0m%s\n",title,s1)
+unsigned int g_streamTblFieldsNum=9;
+unsigned int g_pktinfoTblFieldsNum=4;
+
+// utilities functions
+void streams_stats() {
+    struct streamHeader *st;
+    long long streamNum=0;
+    struct in_addr sip,dip;
+    for (int i=0;i<STREAM_TABLE_SIZE;i++) {
+        st=g_streamHdr+i;
+        if (st->num>0) {
+            while (st != nullptr) {
+                sip.s_addr=st->sip.ip32;
+                dip.s_addr=st->dip.ip32;
+                char str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET,&sip, str, sizeof(str));
+                printf("%lld:hash %x, \033[1;32;40m%s\033[0m:%d",++streamNum,st->hash,str,ntohs(st->sport));
+                inet_ntop(AF_INET,&dip, str, sizeof(str));
+                printf(" -> \033[1;32;40m%s\033[0m:%d,pkt number(%d).\n",str,ntohs(st->dport),st->pktNumber);
+                /*
+                for (int j=0;j<st->pktNumber;j++)
+                    printf("%d ",st->pktInfo[j].pktlen);
+                printf("\n");
+                */
+                st=st->next;
+            }
+        }
+    }
+}
