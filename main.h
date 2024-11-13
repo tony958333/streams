@@ -42,6 +42,7 @@
 
 //待处理的tcpdump文件名
 char g_szDumpFileName[1024]="dump.pcap";
+char g_SNI[128]="";
 long long g_pktno; //paket no in pcap file
 
 /* 接收缓冲区 */
@@ -82,7 +83,7 @@ struct pcap_file_header {
 //时间戳
 struct time_val {
     u_int32 tv_sec;					//时间戳高位，精确到seconds
-    u_int32 tv_usec;				//时间戳地位，精确到microseconds
+    u_int32 tv_usec;				//时间戳低位，精确到microseconds
 };
 //pcap file global header
 struct pcap_file_header g_pcapFileHeader;
@@ -101,21 +102,31 @@ union ipaddr {
 };
 struct pktinfo_t {
     int32_t pktlen;
-    int32_t pcappktno; // packet number in pcap file
+    u_int32 pcappktno; // packet number in pcap file
+    struct time_val ts;// 包捕获时间戳
 };
 struct streamHeader {
     u_int16 hash; //sip(H)^sip(L)^dip(H)^dip(L)^sport^dport
     u_int16 num;  //该表项包含多少个流
     struct streamHeader *next; //hash碰撞后的流表项；
     //
+    u_int8 ipv; //ip version, 4 or 6
     union ipaddr sip,dip; //table streams field 3,5
+    struct in6_addr sip6,dip6;
+    char sipstr[40],dipstr[40];
     u_int16 sport,dport;  //table streams field 4,6
     u_int8 protocol;      //table streams field 7
-    struct time_val ts;			//首包捕获时间
+    struct time_val ts;			//首包捕获时间戳
+    struct time_val te;			//尾包捕获时间戳
     u_int64 upstreamlen;  //上行数据包总长度
     u_int64 downstreamlen;  //下行数据包总长度
+    u_int64 streamlen;    //上下行数据包总长度
     u_int32 pktInfoSize; //包长序列当前容量，初始为0
-    u_int32 pktNumber;   //收到的包数 table streams field 8
+    u_int32 up_pktNumber;//收到的上行包数
+    u_int32 down_pktNumber;//收到的下行包数
+    u_int32 pktNumber;   //收到的上下行总包数 table streams field 8
+    char SNI[128];// "sina.com.cn"
+    char tlsv[8]; // tls version "SSL3.0","TLS1.0","TLS1.1","TLS1.2","TLS1.3"
     struct pktinfo_t *pktInfo; //保存包特征序列，初始大小PKTINFO_SIZE，可以倍增法扩容
 };
 struct streamHeader g_streamHdr[STREAM_TABLE_SIZE];
@@ -133,7 +144,9 @@ struct config {
 } g_cfg;
 MYSQL *g_mysql;
 char g_sql[2048];
+#define min(a, b) ((a) < (b) ? (a) : (b))
 #define error1(title,s1) printf("\033[1;31;40m[%s Error]\033[0m%s\n",title,s1)
+#define error2(title,s1,s2) printf("\033[1;31;40m[%s Error]\033[0m%s:%s\n",title,s1,s2)
 unsigned int g_streamTblFieldsNum=9;
 unsigned int g_pktinfoTblFieldsNum=4;
 
@@ -162,4 +175,11 @@ void streams_stats() {
             }
         }
     }
+}
+bool ip6e(const struct in6_addr *sip6,const struct in6_addr *dip6) {
+    for (int i=0;i<4;i++) {
+        if (sip6->__in6_u.__u6_addr32[i]!=dip6->__in6_u.__u6_addr32[i])
+            return false;
+    }
+    return true;
 }
