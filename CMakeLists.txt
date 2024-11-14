@@ -3,5 +3,6 @@ project(streams C)
 
 set(CMAKE_C_STANDARD 23)
 
-add_executable(streams main.c)
+add_executable(streams main.c
+)
 target_link_libraries(streams libSDL2.so cjson mysqlclient)

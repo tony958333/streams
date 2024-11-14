@@ -1,5 +1,6 @@
 #include "main.h"
 #include "plot.h"
+#include "dns.h"
 
 /* 输出MAC地址 */
 static void ethdump_showMac(const int iType, const char acHWAddr[])
@@ -36,14 +37,36 @@ static int ethdump_parseIcmpHead(const struct icmphdr *pstIcmpHead,void *ipHEAD,
     if (nullptr == pstIcmpHead) {
         return -1;
     }
-    printf("ICMP-Pkt:");
-    printf("Type=[%d] ", ntohs(pstIcmpHead->type));
-    printf("Code=[%d]\n", ntohs(pstIcmpHead->code));
+    const struct ip *pstIpHead;
+    union ipaddr *sip,*dip;
+
+    const struct ipv6hdr *pstIpv6Head;
+    const struct in6_addr *sip6,*dip6;
+
+    char strSip[INET6_ADDRSTRLEN],strDip[INET6_ADDRSTRLEN];
+
+    if (ipV6) {
+        pstIpv6Head=(struct ipv6hdr *)ipHEAD;
+        sip6=&pstIpv6Head->saddr;
+        dip6=&pstIpv6Head->daddr;
+        inet_ntop(AF_INET6,sip6, strSip, sizeof(strSip));
+        inet_ntop(AF_INET6,dip6, strDip, sizeof(strDip));
+    } else {
+        pstIpHead=(struct ip *)ipHEAD;
+        sip=(union ipaddr *)&(pstIpHead->ip_src);
+        dip=(union ipaddr *)&(pstIpHead->ip_dst);
+        inet_ntop(AF_INET,sip, strSip, sizeof(strSip));
+        inet_ntop(AF_INET,dip, strDip, sizeof(strDip));
+    }
+    printf("ICMP:%s -> %s\n",strSip,strDip);
+    printf("Type=[%d]%s, ", pstIcmpHead->type,(pstIcmpHead->type==8?"Echo Request":(pstIcmpHead->type==0?"Echo Reply":"")));
+    printf("Code=[%d]\n", pstIcmpHead->code);
+    g_pktdropICMP++;
     return 0;
 }
 
 /* 解析UDP数据包头 */
-static int ethdump_parseUdpHead(const struct udphdr *pstUdpHead,void *ipHEAD,bool ipV6)
+static int parseUdpHead(const struct udphdr *pstUdpHead,void *ipHEAD,bool ipV6)
 {
     if (nullptr == pstUdpHead) {
         return -1;
@@ -63,7 +86,7 @@ static int ethdump_parseUdpHead(const struct udphdr *pstUdpHead,void *ipHEAD,boo
         dip6=&pstIpv6Head->daddr;
         inet_ntop(AF_INET6,sip6, strSip, sizeof(strSip));
         inet_ntop(AF_INET6,dip6, strDip, sizeof(strDip));
-        iplen=ntohs(pstIpv6Head->payload_len)+40; //only for TCP over IPv6, no extend IPv6 header
+        iplen=ntohs(pstIpv6Head->payload_len)+40; //only for UDP over IPv6, no extend IPv6 header
     } else {
         pstIpHead=(struct ip *)ipHEAD;
         sip=(union ipaddr *)&(pstIpHead->ip_src);
@@ -72,13 +95,17 @@ static int ethdump_parseUdpHead(const struct udphdr *pstUdpHead,void *ipHEAD,boo
         inet_ntop(AF_INET,dip, strDip, sizeof(strDip));
         iplen=ntohs(pstIpHead->ip_len);
     }
-    /*
-    printf("UDP-Pkt:");
-    printf("SPort=[%d] ", ntohs(pstUdpHead->uh_sport));
-    printf("DPort=[%d]\n", ntohs(pstUdpHead->uh_dport));
-    */
-    //流表处理
     struct pcap_pkthdr *hdr=(struct pcap_pkthdr *)g_pBuff;
+    // printf("UDP-Pkt:SPort=[%d] DPort=[%d]\n", ntohs(pstUdpHead->uh_sport), ntohs(pstUdpHead->uh_dport));
+    // parsing DNS
+    if (g_cfg.collectDNS && ntohs(pstUdpHead->uh_sport)==53) {
+        //if (g_pktno==1048)
+            printf("pktNo:%lld\n",g_pktno);
+        char *ph=(char *)(pstUdpHead+1); //-> DNS
+        //printf("Pktno:%lld",g_pktno);
+        dns_parse_response(ph,strSip,strDip,&hdr->ts);
+    }
+    //流表处理
     bool bDownStream=false; //上行流还是下行流
     //计算hash，即流表索引
     u_int16 hash=0;
@@ -130,6 +157,7 @@ static int ethdump_parseUdpHead(const struct udphdr *pstUdpHead,void *ipHEAD,boo
             st->sport=pstUdpHead->uh_sport;
             st->dport=pstUdpHead->uh_dport;
         }
+        st->ipv=(ipV6?6:4);
         st->protocol=IPPROTO_UDP;
         st->next=nullptr; //hash碰撞后的流表项；
         st->ts=hdr->ts;
@@ -210,6 +238,7 @@ static int ethdump_parseUdpHead(const struct udphdr *pstUdpHead,void *ipHEAD,boo
                 st->sport=pstUdpHead->uh_sport;
                 st->dport=pstUdpHead->uh_dport;
             }
+            st->ipv=(ipV6?6:4);
             st->protocol=IPPROTO_UDP;
             st->next=nullptr; //hash碰撞后的流表项；
             st->ts=hdr->ts;
@@ -258,7 +287,7 @@ static int ethdump_parseUdpHead(const struct udphdr *pstUdpHead,void *ipHEAD,boo
 }
 
 /* 解析TCP数据包头 */
-static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,void *ipHEAD,bool ipV6)
+static int parseTcpHead(const struct tcphdr *pstTcpHead,void *ipHEAD,bool ipV6)
 {
     if (nullptr == pstTcpHead) {
         return -1;
@@ -299,27 +328,30 @@ static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,void *ipHEAD,boo
     else
         tcppayloadlen=ntohs(pstIpHead->ip_len)-pstIpHead->ip_hl*4-pstTcpHead->th_off*4;
     char *pstTLS=(char *)pstTcpHead+pstTcpHead->th_off*4;
-    char *pstEND;
-    if (ipV6)
-        pstEND=(char *)pstIpv6Head+min(iplen,hdr->caplen-14);
-    else
-        pstEND=(char *)pstIpHead+min(ntohs(pstIpHead->ip_len),hdr->caplen-14);
+    char *pstEND=(char *)(hdr+1)+hdr->caplen;
     bool foundClientHello=false;
     bool foundSNI=false;
     int tlsVersion=-1;
     int CHlen=0;
+    u_int16 CipherSuiteLen=0;
+    char CipherSuite[128];
     if (pstTLS[0]==0x16) {// TLS handshake
         tlsVersion=ntohs(*(u_int16 *)(pstTLS+1));
         CHlen=ntohs(*(u_int16 *)(pstTLS+3));
         if (tlsVersion>=0x300 && tlsVersion<=0x304 && CHlen==tcppayloadlen-5 && *(pstTLS+5)==1) {
             foundClientHello=true;
             char *pch=(char *)pstTLS+5;
-            pch+=38; // Session ID length: 1 byte
-            pch+=(u_int8)(*pch)+1; // CipherSuite length: 2 bytes
-            pch+=ntohs(*(u_int16 *)(pch))+2; //Compression Methods length: 1 byte
-            pch+=(u_int8)(*pch)+1; // Extension length: 2bytes
-            u_int16 extlen=ntohs(*(u_int16 *)pch);
-            pch+=2; //Extensions
+            pch+=38; // ->Session ID length: 1 byte
+            pch+=(u_int8)(*pch)+1; // ->CipherSuite length: 2
+            CipherSuiteLen=ntohs(*(u_int16 *)(pch));
+            pch+=2;
+            for (int i=0;i<min(CipherSuiteLen,128);i++) {
+                CipherSuite[i]=pch[i];
+            }
+            pch+=CipherSuiteLen; //->Compression Methods length: 1 byte
+            pch+=(u_int8)(*pch)+1; // ->Extension length: 2bytes
+            u_int16 extlen=ntohs(*(u_int16 *)pch); //externsions length
+            pch+=2; //->Extensions
             char *pext=pch;
             while (pext<pch+extlen && pext<pstEND) {
                 u_int16 type=ntohs(*(u_int16 *)pext);
@@ -332,7 +364,7 @@ static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,void *ipHEAD,boo
                         // host_name
                         foundSNI=true;
                         pext++; // -> server name length: 2 bytes
-                        u_int16 SNIlen=*(u_int16 *)pext;
+                        u_int16 SNIlen=ntohs(*(u_int16 *)pext);
                         pext+=2;// -> SNI
                         if (SNIlen>120) {
                             //truncate
@@ -405,6 +437,7 @@ static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,void *ipHEAD,boo
             st->sport=pstTcpHead->th_sport;
             st->dport=pstTcpHead->th_dport;
         }
+        st->ipv=(ipV6?6:4);
         st->protocol=IPPROTO_TCP;
         st->next=nullptr; //hash碰撞后的流表项；
         st->ts=hdr->ts;
@@ -489,6 +522,7 @@ static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,void *ipHEAD,boo
                 st->sport=pstTcpHead->th_sport;
                 st->dport=pstTcpHead->th_dport;
             }
+            st->ipv=(ipV6?6:4);
             st->protocol=IPPROTO_TCP;
             st->next=nullptr; //hash碰撞后的流表项；
             st->ts=hdr->ts;
@@ -520,11 +554,13 @@ static int ethdump_parseTcpHead(const struct tcphdr *pstTcpHead,void *ipHEAD,boo
     }
     //流信息更新
     st->te=hdr->ts; //尾包捕获时间
-    if (tlsVersion==0x300) strcpy(st->tlsv,"SSL3.0");
-    if (tlsVersion==0x301) strcpy(st->tlsv,"TLS1.0");
-    if (tlsVersion==0x302) strcpy(st->tlsv,"TLS1.1");
-    if (tlsVersion==0x303) strcpy(st->tlsv,"TLS1.2");
-    if (tlsVersion==0x304) strcpy(st->tlsv,"TLS1.3");
+    getTLSV(st->tlsv,tlsVersion);
+    if (CipherSuiteLen>0) {
+        st->CipherSuiteLen=CipherSuiteLen;
+        for (int i=0;i<min(CipherSuiteLen,128);i++) {
+            st->CipherSuite[i]=CipherSuite[i];
+        }
+    }
     if (foundSNI) {
         strcpy(st->SNI,g_SNI);
     }
@@ -556,7 +592,7 @@ static int ethdump_parseIpv6Head(const struct ipv6hdr *pstIpv6Head)
     char strDip[INET6_ADDRSTRLEN];
     inet_ntop(AF_INET6,&pstIpv6Head->saddr, strSip, sizeof(strSip));
     inet_ntop(AF_INET6,&pstIpv6Head->daddr, strDip, sizeof(strDip));
-    printf("IPv6-Pkt:");
+    //printf("IPv6-Pkt:");
     /*
     uint16_t *sa=(uint16_t *)&(pstIpv6Head->saddr.__in6_u.__u6_addr16);
     uint16_t *da=(uint16_t *)&(pstIpv6Head->daddr.__in6_u.__u6_addr16);
@@ -567,24 +603,25 @@ static int ethdump_parseIpv6Head(const struct ipv6hdr *pstIpv6Head)
     switch (pstIpv6Head->nexthdr) {
         case IPPROTO_UDP:
             struct udphdr *pstUdpHdr = (struct udphdr *)(pstIpv6Head+1);
-            iRet = ethdump_parseUdpHead(pstUdpHdr,(void *)pstIpv6Head,true);
+            iRet = parseUdpHead(pstUdpHdr,(void *)pstIpv6Head,true);
             break;
         case IPPROTO_TCP:
             struct tcphdr *pstTcpHdr = (struct tcphdr *)(pstIpv6Head+1);
-            iRet = ethdump_parseTcpHead(pstTcpHdr,(void *)pstIpv6Head,true);
+            iRet = parseTcpHead(pstTcpHdr,(void *)pstIpv6Head,true);
             break;
         case IPPROTO_ICMP: //icmpv4
             struct icmphdr *pstIcmpHdr = (struct icmphdr *)(pstIpv6Head+1);
             iRet = ethdump_parseIcmpHead(pstIcmpHdr,(void *)pstIpv6Head,true);
             break;
         default:
+            g_pktdropIPv6++;
             break;
     }
     return iRet;
 }
 
 /* 解析IP数据包头 */
-static int ethdump_parseIpHead(const struct ip *pstIpHead)
+static int parseIpHead(const struct ip *pstIpHead)
 {
     int iRet=-1;
     struct protoent *pstIpProto = nullptr;
@@ -610,24 +647,25 @@ static int ethdump_parseIpHead(const struct ip *pstIpHead)
     switch (pstIpHead->ip_p) {
         case IPPROTO_UDP:
             struct udphdr *pstUdpHdr = (struct udphdr *)(pstIpHead+1);
-            iRet = ethdump_parseUdpHead(pstUdpHdr,(void *)pstIpHead,false);
+            iRet = parseUdpHead(pstUdpHdr,(void *)pstIpHead,false);
             break;
         case IPPROTO_TCP:
             struct tcphdr *pstTcpHdr = (struct tcphdr *)(pstIpHead+1);
-            iRet = ethdump_parseTcpHead(pstTcpHdr,(void *)pstIpHead,false);
+            iRet = parseTcpHead(pstTcpHdr,(void *)pstIpHead,false);
             break;
         case IPPROTO_ICMP:
             struct icmphdr *pstIcmpHdr = (struct icmphdr *)(pstIpHead+1);
             iRet = ethdump_parseIcmpHead(pstIcmpHdr,(void *)pstIpHead,false);
             break;
         default:
+            g_pktdropIPv4++;
             break;
     }
     return iRet;
 }
 
 /* 解析Ethernet帧首部 */
-static int ethdump_parseEthHead(const struct ether_header *pstEthHead)
+static int parseEthHead(const struct ether_header *pstEthHead)
 {
     int iRet = -1;
     unsigned short usEthPktType;
@@ -642,116 +680,53 @@ static int ethdump_parseEthHead(const struct ether_header *pstEthHead)
     //ethdump_showMac(1, pstEthHead->ether_dhost);
     //printf("\n");
     //
+    char *pdu=(char *)(pstEthHead+1); // -> VLAN tag
+    if (usEthPktType==ETHERTYPE_VLAN) {
+        //parsing VLAN tag
+        pdu+=2;
+        usEthPktType = ntohs(*(u_int16 *)pdu);
+        pdu+=2;
+    }
     switch (usEthPktType) {
         case ETHERTYPE_IP:
             /* IP数据包类型 */
             struct ip *pstIpHead = nullptr;
-            pstIpHead  = (struct ip *)(pstEthHead + 1);
-            iRet = ethdump_parseIpHead(pstIpHead);
+            pstIpHead  = (struct ip *)pdu;
+            iRet = parseIpHead(pstIpHead);
             break;
         case ETHERTYPE_IPV6:
             /* IPv6数据包类型 */
             struct ipv6hdr *pstIpv6Head = nullptr;
-            pstIpv6Head  = (struct ipv6hdr *)(pstEthHead + 1);
+            pstIpv6Head  = (struct ipv6hdr *)pdu;
             iRet = ethdump_parseIpv6Head(pstIpv6Head);
             break;
         default:
+            g_pktdrop++;
             break;
     }
     return iRet;
 }
 
 /* 数据帧解析函数 */
-static int ethdump_parseFrame(const char *pcFrameData)
+static int parseFrame(const char *pcFrameData)
 {
     int iRet = -1;
     struct ether_header *pstEthHead = nullptr;
 
     /* Ethnet帧头解析 */
     pstEthHead = (struct ether_header*)pcFrameData;
-    iRet = ethdump_parseEthHead(pstEthHead);
+    if (g_cfg.vxlan) {
+        char * pdu=(char *)(pstEthHead+1); //-> outer ip hdr
+        pdu=(char *)((struct ip *)pdu+1); //-> outer udp
+        pdu=(char *)((struct udphdr *)pdu+1); //->vxlan tag, 8 bytes
+        pdu+=8; //->inner ethernet header
+        iRet = parseEthHead((struct ether_header*)pdu);
+    }else {
+        iRet = parseEthHead(pstEthHead);
+    }
     return iRet;
 }
 
-int readconfig() {
-    g_cfg.mysqlPort=3306;
-    strcpy(g_cfg.mysqlIPString,"127.0.0.1");
-    inet_pton(AF_INET,g_cfg.mysqlIPString,&g_cfg.mysqlIP);
-    strcpy(g_cfg.mysqlUserName,"root");
-    strcpy(g_cfg.mysqlPassword,"Cxx12345");
-    strcpy(g_cfg.mysqlDB,"streams");
-    strcpy(g_cfg.mysqlStreamsTbl,"streams");
-    strcpy(g_cfg.mysqlPktInfoTbl,"pktinfo");
-    // 读取JSON文件
-    FILE *file = fopen("config.json", "r");
-    if (file == NULL) {
-        perror("config file open");
-        return -1;
-    }
-    fseek(file, 0, SEEK_END);
-    const long int n1=ftell(file);
-    rewind(file);
-    char *readBuffer = (char *)malloc(n1+16);
-    if (readBuffer == NULL) {
-        perror("buffer malloc");
-        return -1;
-    }
-    const unsigned long int n=fread(readBuffer, 1, n1, file);
-    if (n != n1) {
-        perror("config file read");
-        free(readBuffer);
-        return -1;
-    }
-    // 解析JSON文件
-    cJSON *cfg = cJSON_Parse(readBuffer);
-    if (cfg == NULL) {
-        const char *error_ptr = cJSON_GetErrorPtr();
-        if (error_ptr != NULL) {
-            fprintf(stderr, "json error: %s\n", error_ptr);
-        }
-        fclose(file);
-        free(readBuffer);
-        return -1;
-    }
-    // 关闭文件
-    fclose(file);
-    free(readBuffer);
-    // 读取JSON数据
-    /* config.json格式：
-     [
-        {"mysqlIPString:"127.0.0.1"},
-        {"mysqlPort:3306},
-        {"mysqlUserName:"root"},
-        {"mysqlPassword:"Cxx12345_"},
-        {"mysqlDB:"streams"}
-     ]
-     */
-    cJSON *item;
-    for (int i = 0; i < cJSON_GetArraySize(cfg); i++) {
-        item = cJSON_GetArrayItem(cfg, i);
-        // UserName
-        if (strcmp(item->child->string, "mysqlIPString") == 0) {
-            strcpy(g_cfg.mysqlIPString, item->child->valuestring);
-            inet_pton(AF_INET,g_cfg.mysqlIPString,&g_cfg.mysqlIP);
-        }else if (strcmp(item->child->string, "mysqlPort") == 0) {
-            g_cfg.mysqlPort=item->child->valueint;
-        }else if (strcmp(item->child->string, "mysqlUserName") == 0) {
-            strcpy(g_cfg.mysqlUserName, item->child->valuestring);
-        }else if (strcmp(item->child->string, "mysqlPassword") == 0) {
-            strcpy(g_cfg.mysqlPassword, item->child->valuestring);
-        }else if (strcmp(item->child->string, "mysqlDB") == 0) {
-            strcpy(g_cfg.mysqlDB, item->child->valuestring);
-        }else if (strcmp(item->child->string,"mysqlStreamsTbl") == 0) {
-            strcpy(g_cfg.mysqlStreamsTbl, item->child->valuestring);
-        }else if (strcmp(item->child->string,"mysqlPktInfoTbl") == 0) {
-            strcpy(g_cfg.mysqlPktInfoTbl, item->child->valuestring);
-        }
-        //printf("string:%s,valuestring:%s,valueint:%d\n", item->child->string,item->child->valuestring,item->child->valueint);
-    }
-    // clear
-    cJSON_Delete(cfg);
-    return 0;
-}
 // before exit;
 void freeBuff() {
     for (int i=0;i<STREAM_TABLE_SIZE;i++) {
@@ -763,6 +738,17 @@ void freeBuff() {
             free(last);
         }
     }
+    while (g_dns_list != NULL) {
+        g_dns_tail=g_dns_list;
+        g_dns_list=g_dns_list->next;
+        if (g_dns_tail->dn) free(g_dns_tail->dn);
+        if (g_dns_tail->rr) free(g_dns_tail->rr);
+        if (g_dns_tail->clt) free(g_dns_tail->clt);
+        if (g_dns_tail->ns) free(g_dns_tail->ns);
+        free(g_dns_tail);
+    }
+    g_dns_tail=nullptr;
+    g_dns_list=nullptr;
 }
 //
 int my_query(const char *query) {
@@ -774,15 +760,23 @@ int my_query(const char *query) {
 }
 int process_args(int argc, char *argv[]) {
     // args parsing
+    //g_cfg.vxlan=false;
     if (argc>1) {
         strcpy(g_szDumpFileName,argv[1]); //tcpdump file name ,e.g. "dump.pcap"
     }
     if (argc>2) {
         sprintf(g_cfg.mysqlStreamsTbl,"%s_streams",argv[2]);
         sprintf(g_cfg.mysqlPktInfoTbl,"%s_pktinfo",argv[2]);
+        sprintf(g_cfg.mysqlDNSTbl,"%s_dns",argv[2]);
+    }
+    if (argc>3) {
+        if (strcmp(argv[3],"vxlan")==0) {
+            g_cfg.vxlan=true;
+        } else
+            g_cfg.vxlan=false;
     }
     if (argc==1) {
-        printf("\nUsage: %s [<pcap file name> [<mysql table name prefix>]]\n",argv[0]);
+        printf("\nUsage: %s [<pcap file name> [<mysql table name prefix> [vxlan]]]\n",argv[0]);
         printf("       <pcap file name> - default: dump.pcap\n");
         printf("       <mysql table name prefix> - default: ''\n\n");
     }
@@ -809,13 +803,13 @@ int main(int argc, char *argv[]) {
     //处理pcap文件头
     unsigned long int n = fread(&g_pcapFileHeader, sizeof(g_pcapFileHeader), 1, fd);
     if (n>0) {
-        printf("magic: %x\n",g_pcapFileHeader.magic);
-        printf("major: %x\n",g_pcapFileHeader.version_major);
-        printf("minor: %x\n",g_pcapFileHeader.version_minor);
-        printf("thisz: %x\n",g_pcapFileHeader.thiszone);
-        printf("sigfi: %x\n",g_pcapFileHeader.sigfigs);
-        printf("snapl: %x\n",g_pcapFileHeader.snaplen);
-        printf("ltype: %x\n",g_pcapFileHeader.linktype);
+        printf("magic: %x, ",g_pcapFileHeader.magic);
+        printf("major: %x, ",g_pcapFileHeader.version_major);
+        printf("minor: %x, ",g_pcapFileHeader.version_minor);
+        printf("thiszone: %x, ",g_pcapFileHeader.thiszone);
+        printf("sigfigs: %x\n",g_pcapFileHeader.sigfigs);
+        printf("snaplen: %x\n",g_pcapFileHeader.snaplen);
+        printf("linktype: %x(%s)\n\n",g_pcapFileHeader.linktype,(g_pcapFileHeader.linktype==1?"Ethernet":""));
     }else{
         perror("[Error]Cannot read pcap file ");
         fclose(fd);
@@ -837,9 +831,6 @@ int main(int argc, char *argv[]) {
         if (n==0) {
             printf("%lld packets processed.\n",g_pktno);
             break;
-        }else if (n<0){
-            perror("[Error]Cannot read pcap packet header");
-            break;
         }
         //read a packet
         struct pcap_pkthdr *hdr=(struct pcap_pkthdr *)buff;
@@ -852,8 +843,9 @@ int main(int argc, char *argv[]) {
         g_pktno++;
         //printf("\033[1;31;40m>>> Packet %lld: len=%d bytes, cap=%d bytes.\033[0m\n",pktNo,hdr->len,hdr->caplen);
         /* 解析数据帧*/
-        ethdump_parseFrame(buff);
+        parseFrame(buff);
     }
+    printf("%llu packets in pcap file, %lld packets dropped, %lld packets could be write to DB.",g_pktno,g_pktdrop,g_pktno-g_pktdrop);
     //流表统计
     //streams_stats();
     //plotting data
@@ -883,52 +875,90 @@ int main(int argc, char *argv[]) {
     my_query(g_sql);
     //sprintf(g_sql,"create table if not exists %s(pcapname varchar(256),sid int unique key auto_increment,sip varchar(16), sport int, dip varchar(16), dport int, protocol int, pktnumber int,PRIMARY KEY (sip,sport,dip,dport,protocol));",g_cfg.mysqlStreamsTbl);
     sprintf(g_sql,"create table if not exists %s(",g_cfg.mysqlStreamsTbl);
-    strcat(g_sql,"pcapname varchar(256),sid int unsigned unique key auto_increment,sip varchar(40), sport int unsigned, dip varchar(40), dport int unsigned, protocol int unsigned, ");
+    strcat(g_sql,"pcapname varchar(256),sid int unsigned unique key auto_increment,sip varchar(40), sport int unsigned, dip varchar(40), dport int unsigned, ipv tinyint unsigned, protocol int unsigned, ");
     strcat(g_sql,"ts_sec timestamp, ts_usec int unsigned, te_sec timestamp, te_usec int unsigned, upstreamlen int(8) unsigned, downstreamlen int(8) unsigned, up_pktnumber int unsigned, down_pktnumber int unsigned, sni varchar(128),tlsv varchar(6),");
+    strcat(g_sql,"ciphersuitelen smallint unsigned, ciphersuite varchar(360),");
     strcat(g_sql,"PRIMARY KEY (sip,sport,dip,dport,protocol));");
     my_query(g_sql);
-    sprintf(g_sql,"drop table %s;",g_cfg.mysqlPktInfoTbl);
-    my_query(g_sql);
-    sprintf(g_sql,"create table if not exists %s(sid int unsigned,pid int unsigned, ts_sec timestamp, ts_usec int unsigned, pktlen int, pcappktno int unsigned, PRIMARY KEY(sid,pid));",g_cfg.mysqlPktInfoTbl);
-    my_query(g_sql);
-    MYSQL_RES *res;
+    // packet information table
+    if (g_cfg.writePktInfo) {
+        sprintf(g_sql,"drop table %s;",g_cfg.mysqlPktInfoTbl);
+        my_query(g_sql);
+        sprintf(g_sql,"create table if not exists %s(sid int unsigned,pid int unsigned, ts_sec timestamp, ts_usec int unsigned, pktlen int, pcappktno int unsigned, PRIMARY KEY(sid,pid));",g_cfg.mysqlPktInfoTbl);
+        my_query(g_sql);
+    }
+    // DNS collection table
+    if (g_cfg.collectDNS) {
+        sprintf(g_sql,"drop table %s;",g_cfg.mysqlDNSTbl);
+        my_query(g_sql);
+        sprintf(g_sql,"create table if not exists %s(dn varchar(255), type varchar(8), rr varchar(255), clt varchar(40), ns varchar(40), ts_sec timestamp, ts_usec int unsigned, ttl int unsigned);",g_cfg.mysqlDNSTbl);
+        my_query(g_sql);
+        while (g_dns_list != NULL) {
+            sprintf(g_sql,"insert into %s(dn,type,rr,clt,ns,ts_sec,ts_usec,ttl) values('%s','%s','%s','%s','%s',from_unixtime(%u),%u,%u); ",
+                         g_cfg.mysqlDNSTbl,g_dns_list->dn,g_dns_list->type,g_dns_list->rr,g_dns_list->clt,g_dns_list->ns,(g_dns_list->ts.tv_sec==0?1:g_dns_list->ts.tv_sec),g_dns_list->ts.tv_usec,g_dns_list->ttl);
+            my_query(g_sql);
+            g_dns_list = g_dns_list->next;
+        }
+    }
+    MYSQL_RES *res=nullptr;
     struct streamHeader *st;
     long long streamNum=0;
+    unsigned char strT[360];
     for (int i=0;i<STREAM_TABLE_SIZE;i++) {
         st=g_streamHdr+i;
         if (st->num>0) {
             while (st != nullptr) {
-                printf("%lld:hash %x,(%d) \033[1;32;40m%s\033[0m:%d -> \033[1;32;40m%s\033[0m:%d,pkt number(%d),SNI:%s.\n",++streamNum,st->hash,st->protocol,st->sipstr,ntohs(st->sport),st->dipstr,ntohs(st->dport),st->pktNumber,st->SNI);
+                printf("%lld:hash %x,(ipv%d:%d) \033[1;32;40m%s\033[0m:%d -> \033[1;32;40m%s\033[0m:%d,pkt number(%d),SNI:%s.\n",++streamNum,st->hash,st->ipv,st->protocol,st->sipstr,ntohs(st->sport),st->dipstr,ntohs(st->dport),st->pktNumber,st->SNI);
                 //
-                sprintf(g_sql,"insert into %s(pcapname,sip,sport,dip,dport,protocol,ts_sec,ts_usec,te_sec,te_usec,upstreamlen,downstreamlen,up_pktnumber,down_pktnumber,sni,tlsv) values('%s','%s',%u,'%s',%u,%u,from_unixtime(%u),%u,from_unixtime(%u),%u,%llu,%llu,%u,%u,'%s','%s');",
-                              g_cfg.mysqlStreamsTbl,g_szDumpFileName,st->sipstr,ntohs(st->sport),st->dipstr,ntohs(st->dport),st->protocol,st->ts.tv_sec+(st->ts.tv_sec==0?1:0),st->ts.tv_usec,st->te.tv_sec+(st->te.tv_sec==0?1:0),st->te.tv_usec,st->upstreamlen,st->downstreamlen,st->up_pktNumber,st->down_pktNumber,st->SNI,st->tlsv);
-                my_query(g_sql);
-                sprintf(g_sql,"select sid from %s where sip='%s' and sport=%u and dip='%s' and dport=%u and protocol=%u;",g_cfg.mysqlStreamsTbl,st->sipstr,ntohs(st->sport),st->dipstr,ntohs(st->dport),st->protocol);
-                my_query(g_sql);
-                res = mysql_store_result(g_mysql);
-                MYSQL_ROW row_data = mysql_fetch_row(res);
-                if (row_data!=nullptr) {
-                    printf("sid: %s",row_data[0]);
-                    for (int j=0;j<st->pktNumber;j++) {
-                        sprintf(g_sql,"insert into %s(sid,pid,ts_sec,ts_usec,pktlen,pcappktno) values(%s,%u,from_unixtime(%u),%u,%d,%u); ",
-                                     g_cfg.mysqlPktInfoTbl,row_data[0],j+1,st->pktInfo[j].ts.tv_sec+(st->pktInfo[j].ts.tv_sec==0?1:0),st->pktInfo[j].ts.tv_usec,st->pktInfo[j].pktlen,st->pktInfo[j].pcappktno);
-                        my_query(g_sql);
-                        if (j%100==0){
-                            printf(".");
-                            fflush(stdout);
-                        }
+                strcpy(strT,"");
+                if (st->CipherSuiteLen>0) {
+                    char * ps=strT;
+                    for (int j=0;j<min(st->CipherSuiteLen,120);) {
+                        unsigned char c=st->CipherSuite[j];
+                        *ps++=HEX[c>>4];
+                        *ps++=HEX[c&0xf];
+                        j++;
+                        if (j%2==0)
+                            *ps++=',';
                     }
-                    printf("\n");
-                }else {
-                    error1("SQL",g_sql);
+                    *--ps='\0';
+                }
+                sprintf(g_sql,"insert into %s(pcapname,sip,sport,dip,dport,ipv,protocol,ts_sec,ts_usec,te_sec,te_usec,upstreamlen,downstreamlen,up_pktnumber,down_pktnumber,sni,tlsv,ciphersuitelen,ciphersuite) values('%s','%s',%u,'%s',%u,%u,%u,from_unixtime(%u),%u,from_unixtime(%u),%u,%llu,%llu,%u,%u,'%s','%s',%u,'%s');",
+                              g_cfg.mysqlStreamsTbl,g_szDumpFileName,st->sipstr,ntohs(st->sport),st->dipstr,ntohs(st->dport),st->ipv,st->protocol,st->ts.tv_sec+(st->ts.tv_sec==0?1:0),st->ts.tv_usec,st->te.tv_sec+(st->te.tv_sec==0?1:0),st->te.tv_usec,
+                              st->upstreamlen,st->downstreamlen,st->up_pktNumber,st->down_pktNumber,st->SNI,st->tlsv,st->CipherSuiteLen>>1,strT);
+                my_query(g_sql);
+                if (g_cfg.writePktInfo) {
+                    sprintf(g_sql,"select sid from %s where sip='%s' and sport=%u and dip='%s' and dport=%u and protocol=%u;",g_cfg.mysqlStreamsTbl,st->sipstr,ntohs(st->sport),st->dipstr,ntohs(st->dport),st->protocol);
+                    my_query(g_sql);
+                    res = mysql_store_result(g_mysql);
+                    MYSQL_ROW row_data = mysql_fetch_row(res);
+                    if (row_data!=nullptr) {
+                        printf("sid: %s",row_data[0]);
+                        for (int j=0;j<st->pktNumber;j++) {
+                            sprintf(g_sql,"insert into %s(sid,pid,ts_sec,ts_usec,pktlen,pcappktno) values(%s,%u,from_unixtime(%u),%u,%d,%u); ",
+                                         g_cfg.mysqlPktInfoTbl,row_data[0],j+1,st->pktInfo[j].ts.tv_sec+(st->pktInfo[j].ts.tv_sec==0?1:0),st->pktInfo[j].ts.tv_usec,st->pktInfo[j].pktlen,st->pktInfo[j].pcappktno);
+                            my_query(g_sql);
+                            if (j%100==0){
+                                printf(".");
+                                fflush(stdout);
+                            }
+                        }
+                        printf("\n");
+                    }else {
+                        error1("SQL",g_sql);
+                    }
                 }
                 st=st->next;
             }
         }
     }
-    mysql_free_result(res);
+    if (res)
+        mysql_free_result(res);
     mysql_close(g_mysql);
     //
     freeBuff();
+    long long t=g_pktdrop+g_pktdropIPv4+g_pktdropIPv6+g_pktdropICMP;
+    printf("%llu packets in pcap file, %lld packets dropped(%lld ETH,%lld IPv4,%lld IPv6,%lld ICMP), %lld packets could be write to DB.\n",g_pktno,t,g_pktdrop,g_pktdropIPv4,g_pktdropIPv6,g_pktdropICMP,g_pktno-t);
+    saveconfig();
     return 0;
 }
